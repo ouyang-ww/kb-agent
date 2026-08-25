@@ -1,0 +1,5 @@
+{"query": "什么是 RAG？", "expected_answer": "RAG 是检索增强生成，先检索相关文档片段再作为上下文生成答案", "relevant_doc_ids": ["184d1257be9f"], "category": "事实问答", "image_required": false}
+{"query": "向量检索用什么相似度度量？", "expected_answer": "余弦相似度、点积、L2 距离", "relevant_doc_ids": ["003a64c947c3"], "category": "事实问答", "image_required": false}
+{"query": "混合检索有什么好处？", "expected_answer": "向量检索擅长语义匹配，BM25 擅长精确匹配，两者结合更稳", "relevant_doc_ids": ["003a64c947c3"], "category": "事实问答", "image_required": false}
+{"query": "Python 中如何定义协程？", "expected_answer": "用 async def 定义协程，await 挂起等待", "relevant_doc_ids": ["48ab7d3becea"], "category": "事实问答", "image_required": false}
+{"query": "成人每天应喝多少水？", "expected_answer": "每天 1500~1700 毫升，少量多次", "relevant_doc_ids": ["54d08190df70"], "category": "事实问答", "image_required": false}
