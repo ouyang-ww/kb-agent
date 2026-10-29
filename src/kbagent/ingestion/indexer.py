@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
-from ..document_store.sqlite_store import SQLiteDocumentStore
+from ..document_store.base import DocumentStore
 from ..errors import IngestError, NotFoundError
-from ..models import Chunk, Document, MediaRef
-from ..vectorstore.chroma_store import ChromaStore
+from ..models import Document, MediaRef
+from ..storage.filters import eq
+from ..vectorstore.base import VectorStore
 from .chunker import Chunker
 from .cleaner import Cleaner
 from .loaders import content_hash, doc_id_for, load_file, scan_path
@@ -46,8 +47,8 @@ class Indexer:
         self,
         settings: Settings,
         embedder,
-        vector_store: ChromaStore,
-        doc_store: SQLiteDocumentStore,
+        vector_store: VectorStore,
+        doc_store: DocumentStore,
         vision_indexer=None,
     ) -> None:
         self.settings = settings
@@ -152,6 +153,7 @@ class Indexer:
 
         ids = [c.chunk_id for c in chunks]
         texts = [c.text for c in chunks]
+        manifest_id = self.settings.embedding_manifest
         metas = [
             {
                 **c.metadata,
@@ -159,6 +161,10 @@ class Indexer:
                 "title": title,
                 "source_path": source_path,
                 "section": c.section,
+                # 向量版本元数据：迁移/回滚时用于识别向量所属模型与切块版本
+                "embedding_manifest_id": manifest_id,
+                "embedding_model": self.settings.embedding_model,
+                "chunker_version": self.settings.chunker_version,
                 **(c.media.to_metadata() if c.media else {}),
             }
             for c in chunks
@@ -196,7 +202,7 @@ class Indexer:
         if not doc:
             return False
         coll = collection or doc.collection
-        self.vector_store.delete(coll, where={"doc_id": doc_id})
+        self.vector_store.delete(coll, where=eq("doc_id", doc_id))
         self.doc_store.delete(doc_id)
         media_dir = self.settings.media_root / doc_id
         if media_dir.exists():

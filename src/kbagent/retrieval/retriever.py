@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..config import Settings
 from ..models import MediaRef, RetrievalHit
+from ..storage.filters import Where
+from ..vectorstore.base import VectorStore
 
 
 class Retriever:
-    def __init__(self, embedder, vector_store, settings: Settings) -> None:
+    def __init__(
+        self, embedder, vector_store: VectorStore, settings: Settings
+    ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store
         self.settings = settings
@@ -18,7 +20,7 @@ class Retriever:
         self,
         query: str,
         top_k: int,
-        where: dict[str, Any] | None = None,
+        where: Where = None,
         collection: str | None = None,
     ) -> list[RetrievalHit]:
         collection = collection or self.settings.default_collection
@@ -26,14 +28,14 @@ class Retriever:
         results = self.vector_store.query(collection, qv, top_k, where)
         hits: list[RetrievalHit] = []
         for r in results:
-            meta: dict = r.get("metadata") or {}
+            meta: dict = r.metadata or {}
             media = MediaRef.from_metadata(meta)
             hits.append(
                 RetrievalHit(
-                    chunk_id=r.get("id", ""),
+                    chunk_id=r.id,
                     doc_id=meta.get("doc_id", ""),
-                    text=r.get("document", ""),
-                    score=float(r.get("score", 0.0)),
+                    text=r.document,
+                    score=float(r.score),
                     title=meta.get("title", ""),
                     section=meta.get("section", ""),
                     source_path=meta.get("source_path", ""),

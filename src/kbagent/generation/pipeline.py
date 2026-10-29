@@ -11,6 +11,7 @@ from ..config import Settings
 from ..errors import LLMError
 from ..models import Answer, SourceRef
 from ..retrieval.parent_expander import ContextItem, ParentExpander
+from ..storage.filters import Where
 from .llm import LLMClient
 
 _SYSTEM_PROMPT = (
@@ -43,7 +44,7 @@ class RAGPipeline:
         self,
         query: str,
         top_k: int | None = None,
-        where: dict[str, Any] | None = None,
+        where: Where = None,
         collection: str | None = None,
         rerank: bool | None = None,
         rewrite: bool | None = None,

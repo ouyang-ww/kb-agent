@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .document_store.sqlite_store import SQLiteDocumentStore
+from .document_store.base import DocumentStore
 from .embedding.local import SentenceTransformerEmbedder
 from .errors import NotFoundError
 from .generation.llm import LLMClient
@@ -21,7 +21,9 @@ from .retrieval.parent_expander import ParentExpander
 from .retrieval.query_processor import QueryProcessor
 from .retrieval.reranker import Reranker
 from .retrieval.retriever import Retriever
-from .vectorstore.chroma_store import ChromaStore
+from .storage.factory import make_document_store, make_vector_store
+from .storage.filters import Where
+from .vectorstore.base import VectorStore
 from .vision.indexer import VisionIndexer
 
 
@@ -30,8 +32,8 @@ class KnowledgeBase:
         self,
         settings: Settings | None = None,
         embedder=None,
-        vector_store=None,
-        doc_store=None,
+        vector_store: VectorStore | None = None,
+        doc_store: DocumentStore | None = None,
         llm=None,
         vision_indexer=None,
     ) -> None:
@@ -49,8 +51,8 @@ class KnowledgeBase:
             batch_size=self.settings.embedding_batch_size,
             ignore_proxy=self.settings.ignore_http_proxy,
         )
-        self._vector_store = vector_store or ChromaStore(self.settings.chroma_dir)
-        self._doc_store = doc_store or SQLiteDocumentStore(self.settings.documents_db)
+        self._vector_store = vector_store or make_vector_store(self.settings)
+        self._doc_store = doc_store or make_document_store(self.settings)
         self._llm = llm or LLMClient(
             base_url=self.settings.llm_base_url,
             api_key=self.settings.llm_api_key,
@@ -156,7 +158,7 @@ class KnowledgeBase:
         self,
         query: str,
         top_k: int | None = None,
-        where: dict[str, Any] | None = None,
+        where: Where = None,
         collection: str | None = None,
         rerank: bool | None = None,
         rewrite: bool | None = None,
@@ -190,7 +192,7 @@ class KnowledgeBase:
         self,
         query: str,
         top_k: int | None = None,
-        where: dict[str, Any] | None = None,
+        where: Where = None,
         collection: str | None = None,
         rerank: bool | None = None,
         rewrite: bool | None = None,
@@ -218,3 +220,4 @@ class KnowledgeBase:
 
     def close(self) -> None:
         self._doc_store.close()
+        self._vector_store.close()

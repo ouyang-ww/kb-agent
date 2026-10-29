@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from pydantic import field_validator
@@ -21,10 +22,25 @@ class Settings(BaseSettings):
             return Path(v).expanduser()
         return v
 
+    @field_validator("vector_metric")
+    @classmethod
+    def _check_metric(cls, v: str) -> str:
+        metric = v.strip().lower()
+        if metric not in {"l2", "cosine", "ip"}:
+            raise ValueError("KB_VECTOR_METRIC 必须是 l2 / cosine / ip")
+        return metric
+
     # ---- 存储 ----
     storage_dir: Path = Path.home() / ".kbagent"
     default_collection: str = "personal"
     media_dir: Path | None = None
+
+    # ---- 存储后端（见 ADR 0001）----
+    vector_store: str = "chroma"      # chroma | （后续）qdrant / lancedb
+    doc_store: str = "sqlite"         # sqlite | （后续）postgres
+    vector_metric: str = "l2"         # l2 | cosine | ip，需与嵌入模型一致
+    embedding_manifest_id: str = ""   # 为空时由 embedding_model + chunker_version 派生
+    chunker_version: str = "c1"       # 切块算法版本，参与 manifest
 
     # ---- 网络 ----
     ignore_http_proxy: bool = True  # 忽略失效代理，直连 LLM/HF（需要代理时设 false）
@@ -83,6 +99,18 @@ class Settings(BaseSettings):
     @property
     def documents_db(self) -> Path:
         return self.storage_dir / "documents.sqlite3"
+
+    @property
+    def study_db(self) -> Path:
+        return self.storage_dir / "study.sqlite3"
+
+    @property
+    def embedding_manifest(self) -> str:
+        """向量版本标识：显式配置优先，否则由模型 + 切块版本派生。"""
+        if self.embedding_manifest_id:
+            return self.embedding_manifest_id
+        slug = re.sub(r"[^a-z0-9]+", "-", self.embedding_model.lower()).strip("-")
+        return f"{slug or 'embedding'}@{self.chunker_version}"
 
     @property
     def media_root(self) -> Path:

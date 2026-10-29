@@ -6,8 +6,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..models import MediaRef, RetrievalHit
+
+if TYPE_CHECKING:
+    from ..document_store.base import DocumentStore
 
 
 @dataclass
@@ -27,7 +31,7 @@ class ContextItem:
 class ParentExpander:
     def __init__(
         self,
-        doc_store,
+        doc_store: "DocumentStore",
         max_parent_chars: int = 4000,
         mode: str = "full",
     ) -> None:
