@@ -35,6 +35,8 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
 | KB_STORAGE_DIR | ~/.kbagent | 数据目录（chroma / sqlite / media / hf-cache） |
+| KB_VECTOR_STORE / KB_DOC_STORE | chroma / sqlite | 存储后端（迁移策略见 [ADR 0001](docs/adr/0001-storage.md)） |
+| KB_VECTOR_METRIC / KB_EMBEDDING_MANIFEST_ID / KB_CHUNKER_VERSION | l2 / 空 / c1 | 向量度量与版本标识（manifest 用于迁移/回滚） |
 | KB_IGNORE_HTTP_PROXY | true | 忽略失效代理直连 LLM/HF（需要代理时设 false） |
 | KB_EMBEDDING_MODEL | BAAI/bge-small-zh-v1.5 | 本地嵌入模型 |
 | KB_CHUNK_SIZE / KB_CHUNK_OVERLAP | 800 / 100 | 切块参数 |
@@ -118,7 +120,7 @@ kb.delete_document(doc_id); kb.stats()
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 71 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态
+.venv/bin/python -m pytest -q          # 88 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象
 ```
 
 ## 目录结构
@@ -126,9 +128,10 @@ kb.delete_document(doc_id); kb.stats()
 ```
 src/kbagent/
 ├── config.py  models.py  errors.py
+├── storage/                    # 中立过滤模型、存储工厂
 ├── embedding/local.py          # 本地 CPU 嵌入
-├── vectorstore/chroma_store.py # 子 chunk 向量库
-├── document_store/sqlite_store.py  # 父文档全文库
+├── vectorstore/                # VectorStore 协议 + Chroma 适配器
+├── document_store/             # DocumentStore 协议 + SQLite 适配器
 ├── ingestion/                  # loaders → cleaner → chunker → indexer
 ├── retrieval/                  # query_processor / retriever / reranker / parent_expander
 ├── generation/                 # llm / pipeline
@@ -150,4 +153,4 @@ src/kbagent/
 - [ ] **L4 知识伙伴**：目标驱动、主动建议、跨笔记综述、教-回
 - [ ] **远期**：音频/视频多模态、ragas 等第三方评估框架
 
-规划文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md)
+规划文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [ADR 0001 存储选型](docs/adr/0001-storage.md)

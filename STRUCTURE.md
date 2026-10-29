@@ -2,7 +2,7 @@
 
 > 项目版本：**v0.1.0（L1 已交付）**
 > 计划版本：**v4**（见 [PLAN.md](PLAN.md)）
-> 结构快照生成时间：**2026-10-29 23:23:37 CST**
+> 结构快照生成时间：**2026-10-30 00:53:14 CST**
 > 项目路径：`/home/ouyang/deepseek_workspace/default/kb-agent`
 > 说明：已排除 `.git`、`.venv`、`.hf-cache`、`__pycache__`、`.pytest_cache`、`eval/.kb-e2e`、`*.egg-info`、`.env` 等缓存/运行/敏感文件
 
@@ -50,6 +50,7 @@ kb-agent/
 │       │   └── server.py
 │       ├── document_store/
 │       │   ├── __init__.py
+│       │   ├── base.py
 │       │   └── sqlite_store.py
 │       ├── embedding/
 │       │   ├── __init__.py
@@ -77,11 +78,16 @@ kb-agent/
 │       │   ├── query_processor.py
 │       │   ├── reranker.py
 │       │   └── retriever.py
+│       ├── storage/
+│       │   ├── __init__.py
+│       │   ├── factory.py
+│       │   └── filters.py
 │       ├── ui/
 │       │   ├── __init__.py
 │       │   └── chat.py
 │       ├── vectorstore/
 │       │   ├── __init__.py
+│       │   ├── base.py
 │       │   └── chroma_store.py
 │       ├── vision/
 │       │   ├── __init__.py
@@ -109,6 +115,7 @@ kb-agent/
 │   ├── test_pipeline.py
 │   ├── test_query_processor.py
 │   ├── test_retriever.py
+│   ├── test_storage_abstraction.py
 │   └── test_vision.py
 ├── .env.example
 ├── .gitignore
@@ -127,12 +134,13 @@ kb-agent/
 | `src/kbagent/ingestion/` | 写入链路：loaders → cleaner(清洗) → chunker → indexer |
 | `src/kbagent/retrieval/` | 读取链路：query_processor(意图/改写) → retriever → reranker(重排) → parent_expander(子母文档) |
 | `src/kbagent/generation/` | RAG 生成：llm(OpenAI 兼容) + pipeline(编号引用/多模态) |
-| `src/kbagent/vectorstore/` + `document_store/` | Chroma(子chunk) + SQLite(父文档全文) |
+| `src/kbagent/storage/` | 存储抽象：后端中立 Filter、适配器工厂 |
+| `src/kbagent/vectorstore/` + `document_store/` | VectorStore / DocumentStore 协议；Chroma(子chunk) + SQLite(父文档全文) |
 | `src/kbagent/vision/` | 多模态：图片提取 → 描述 → OCR → 图文单元 |
 | `src/kbagent/eval/` | 评估：评测集 / 指标(recall@k, accuracy…) / LLM-as-judge / 对比实验 |
 | `src/kbagent/api/` + `ui/` | FastAPI REST + Gradio 聊天界面 |
 | `src/kbagent/cli.py` | CLI：ingest / search / ask / list / delete / stats / serve / chat / eval / eval-build |
-| `tests/` | 71 个测试，覆盖 L1 全部模块 |
+| `tests/` | 88 个测试，覆盖 L1 全部模块 + 存储抽象契约 |
 | `examples/` | 组件集成示例 + 示例知识库文档 |
 | `eval/` | 基线评测集与评估报告 |
 | `docs/` | 规划文档：愿景、L1→L3 拆解、知识治理、知识图谱学习笔记；`adr/` 架构决策记录；`archive/` 历史计划 |
@@ -144,7 +152,7 @@ kb-agent/
 | 层级 | 内容 | 状态 |
 | --- | --- | --- |
 | **L1** | 检索助手（当前代码） | ✅ v0.1.0 |
-| **P0** | 治理骨架：`docs_meta` / `doc_events` / scope / embedding manifest | 待启动 |
+| **P0** | 治理骨架 + 存储抽象 | 进行中（存储抽象 ✅） |
 | **L2** | 知识结构：概念抽取、消歧、概念页、覆盖度 | 规划中 |
 | **L3** | 学习闭环：题库、掌握度、调度、每日队列、周报 | 规划中 |
 | **L4** | 目标驱动、主动建议、综述、教-回 | 非本计划 |
@@ -154,5 +162,5 @@ kb-agent/
 ## 测试状态
 
 ```
-71 passed in ~6s
+88 passed in ~7s
 ```

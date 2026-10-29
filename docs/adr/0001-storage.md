@@ -1,8 +1,9 @@
 # ADR 0001：存储选型与迁移策略
 
-- **状态**：Accepted
+- **状态**：Accepted（P0 存储抽象已实施 2026-10-29，88 tests）
 - **日期**：2026-10-29
 - **决策**：L1–L3 保持 **Chroma + SQLite**，不引入 Milvus / MySQL；通过存储 Protocol 抽象保证后续可迁移
+- **待办**：`StudyStore` Protocol 随学习库 schema 一并设计
 - **相关**：[PLAN v4](../../PLAN.md) · [知识治理](../knowledge-governance.md) · [L1→L3 拆解](../mvp-l1-to-l3.md)
 
 ---
@@ -148,15 +149,15 @@ Milvus + MySQL 没有跨存储事务；把 outbox 搬到更重的组件上，只
 
 ## 8. 接口化改造清单
 
-### P0（进入 P0 实施前完成）
+### P0（存储抽象已完成 2026-10-29）
 
-- [ ] 新增 `document_store/base.py`：`DocumentStore` Protocol
-- [ ] 新增 `storage/filters.py`：后端中立过滤模型 + 编译接口
-- [ ] 新增 `storage/factory.py`：按配置创建 store
-- [ ] 统一 `VectorHit` 结构：`distance`、`score`（0–1，越大越相关）、`metric`
-- [ ] chunk 元数据写入 `embedding_manifest_id`、`embedding_model`、`chunker_version`
-- [ ] `StudyStore` Protocol 与 schema 同步设计
-- [ ] 契约测试：同一套 CRUD / 过滤 / 排序 / 幂等测试跑所有适配器
+- [x] 新增 `document_store/base.py`：`DocumentStore` Protocol
+- [x] 新增 `storage/filters.py`：后端中立过滤模型 + 编译接口
+- [x] 新增 `storage/factory.py`：按配置创建 store
+- [x] 统一 `VectorHit` 结构：`distance`、`score`（0–1，越大越相关）、`metric`
+- [x] chunk 元数据写入 `embedding_manifest_id`、`embedding_model`、`chunker_version`
+- [ ] `StudyStore` Protocol 与 schema 同步设计（延后，避免在数据模型确定前锁死接口）
+- [x] 契约测试：`tests/test_storage_abstraction.py`（17 个）
 
 ### P1
 

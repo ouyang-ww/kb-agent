@@ -206,7 +206,7 @@ doc_events → consumers（向量库 / mentions / items / reports / cache / queu
 - `embedding_manifest` + `runtime_pointer`
 - `answer_log`
 - 隐藏文档自动化测试（`search` / `ask` / `study` 三处均无结果）
-- 存储抽象：`DocumentStore` / `StudyStore` Protocol、工厂、后端中立过滤模型、契约测试
+- 存储抽象：`DocumentStore` Protocol、工厂、后端中立过滤模型、契约测试（✅ 2026-10-29，见 [ADR 0001](docs/adr/0001-storage.md)）
 
 ---
 
