@@ -140,7 +140,14 @@ src/kbagent/
 
 ## Roadmap
 
-- [ ] 音频/视频多模态
-- [ ] 混合检索（BM25 + 向量）
-- [ ] 更多向量库后端（FAISS / LanceDB）
-- [ ] 接入 ragas 等第三方评估框架
+按 [PLAN v4](PLAN.md) 的层级推进（L1 已交付）：
+
+- [x] **L1 检索助手**：清洗、子母文档、重排、多模态、评估（v0.1.0）
+- [ ] **P0 治理骨架**：`docs_meta` / `doc_events` / scope 隔离 / embedding manifest
+- [ ] **L2 知识管理员**：概念与关系抽取、去重合并、缺口分析、概念页
+- [ ] **L3 学习教练**：学习者模型、题库、间隔复习、每日队列、周报
+- [ ] **按需**：混合检索（BM25 + 向量）、更多向量库后端（FAISS / LanceDB）
+- [ ] **L4 知识伙伴**：目标驱动、主动建议、跨笔记综述、教-回
+- [ ] **远期**：音频/视频多模态、ragas 等第三方评估框架
+
+规划文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md)
