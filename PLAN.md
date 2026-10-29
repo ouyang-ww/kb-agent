@@ -59,7 +59,7 @@ v4 不推翻 v3：**L1 的成功标准保留为回归护栏**，任何 L2/L3 改
 - `get_document(doc_id)` 回查原文档；检索结果带 `doc_id` 溯源；delete 级联
 - 多模态：图片提取 → 描述 → 可选 OCR → 图文单元检索 → vision 生成；无 vision 模型自动降级
 - `kb eval` 输出 recall@k / accuracy / faithfulness 等指标与对比报告；红线 Recall@5 ≥ 0.8 / Accuracy ≥ 0.75 / Faithfulness ≥ 0.9
-- REST 全端点可用；Gradio 显示来源；`pytest` 全绿，结果追加到 [`test_history.log`](test_history.log)
+- REST 全端点可用；Gradio 显示来源；`pytest` 全绿，结果追加到本地 `test_history.log`（不纳入 git）
 - **`KB_STUDY_ENABLED=false` 时，行为与性能与 v0.1.0 一致**
 
 ### 2.2 L2 成功标准
@@ -326,7 +326,7 @@ L1 配置保持不变（`KB_EMBEDDING_MODEL` / `KB_CHUNK_SIZE` / `KB_RERANK_*` /
 
 ## 11. 测试历史与回归记录
 
-**唯一记录文件**：[`test_history.log`](test_history.log)（仓库根目录，纳入 git）。
+**唯一记录文件**：`test_history.log`（仓库根目录，**本地保留，不纳入 git**，见 `.gitignore`）。
 
 规则：
 
@@ -335,6 +335,7 @@ L1 配置保持不变（`KB_EMBEDDING_MODEL` / `KB_CHUNK_SIZE` / `KB_RERANK_*` /
 - 失败与修复必须写清「现象 → 原因 → 方案」，便于回溯
 - 不写入 API Key 等敏感信息；`.env` 永不入库
 - 与评估报告分工：`test_history.log` 记录测试与回归；`eval/reports/` 记录检索 / 生成指标
+- 该文件可能含本机环境信息，仅本地保留，不随开源仓库发布
 
 当前文件已包含 v0.1.0 的测试环境、71 个测试结果、9 轮迭代、问题与解决方案、Git 变更记录。
 

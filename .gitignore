@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.claude/
 *.egg-info/
 .eggs/
 build/
@@ -14,3 +15,6 @@ eval/reports/*.md
 eval/.kb-e2e/
 .hf-cache/
 ~/.kbagent/
+
+# 本地测试记录（可能含本机环境信息，不随仓库发布）
+test_history.log
