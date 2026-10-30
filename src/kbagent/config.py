@@ -98,7 +98,9 @@ class Settings(BaseSettings):
     # ---- 服务 ----
     api_host: str = "127.0.0.1"
     api_port: int = 8710
-    api_key: str = ""
+    api_key: str = ""          # 兼容旧配置：等同 admin key
+    api_read_key: str = ""     # 只读：search / ask / 文档读取
+    api_admin_key: str = ""    # 管理：ingest / delete / flags / 审计
     ui_port: int = 7860
 
     # ---- 派生路径 ----

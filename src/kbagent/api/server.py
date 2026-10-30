@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -75,14 +76,29 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
 
     app = FastAPI(title="kbagent REST API", version="0.1.0")
 
-    def auth(request: Request) -> None:
-        if settings.api_key:
-            key = request.headers.get("X-API-Key", "")
-            if key != settings.api_key:
-                raise HTTPException(status_code=401, detail="无效的 API Key")
+    def _keys() -> tuple[str, str]:
+        # 旧 api_key 视为 admin；未配置 admin 时 admin 端点不可用（除非完全没有 Key）
+        admin = settings.api_admin_key or settings.api_key
+        read = settings.api_read_key or admin
+        return read, admin
+
+    def _check_key(request: Request, admin_required: bool) -> None:
+        read_key, admin_key = _keys()
+        if not read_key and not admin_key:
+            return
+        supplied = request.headers.get("X-API-Key", "")
+        candidates = (admin_key,) if admin_required else (read_key, admin_key)
+        if not any(k and hmac.compare_digest(supplied, k) for k in candidates):
+            raise HTTPException(status_code=401, detail="无效的 API Key")
+
+    def auth_read(request: Request) -> None:
+        _check_key(request, admin_required=False)
+
+    def auth_admin(request: Request) -> None:
+        _check_key(request, admin_required=True)
 
     # ---- 检索 ----
-    @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(auth)])
+    @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(auth_read)])
     def search(req: QueryRequest):
         hits = kb.search(
             req.query,
@@ -92,7 +108,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         )
         return SearchResponse(hits=[_hit_out(h) for h in hits])
 
-    @app.post("/v1/ask", response_model=AskResponse, dependencies=[Depends(auth)])
+    @app.post("/v1/ask", response_model=AskResponse, dependencies=[Depends(auth_read)])
     def ask(req: QueryRequest):
         ans = kb.ask(
             req.query,
@@ -118,7 +134,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         )
 
     # ---- 入库（JSON 文本）----
-    @app.post("/v1/ingest", response_model=IngestResponse, dependencies=[Depends(auth)])
+    @app.post("/v1/ingest", response_model=IngestResponse, dependencies=[Depends(auth_admin)])
     def ingest(req: IngestTextRequest):
         if not req.content.strip():
             raise HTTPException(status_code=422, detail="content 不能为空")
@@ -136,7 +152,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         return IngestResponse(doc_id=doc_id, status="added" if doc_id else "skipped")
 
     # ---- 入库（文件上传，multipart）----
-    @app.post("/v1/ingest/file", response_model=IngestResponse, dependencies=[Depends(auth)])
+    @app.post("/v1/ingest/file", response_model=IngestResponse, dependencies=[Depends(auth_admin)])
     async def ingest_file(
         file: UploadFile = File(...),
         collection: str | None = None,
@@ -157,37 +173,37 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         return IngestResponse(doc_id=None, status="skipped", path=file.filename)
 
     # ---- 文档管理 ----
-    @app.get("/v1/documents", response_model=list[DocumentOut], dependencies=[Depends(auth)])
+    @app.get("/v1/documents", response_model=list[DocumentOut], dependencies=[Depends(auth_read)])
     def list_documents(collection: str | None = None):
         return [_doc_out(d) for d in kb.list_documents(collection)]
 
-    @app.get("/v1/documents/{doc_id}", response_model=DocumentOut, dependencies=[Depends(auth)])
+    @app.get("/v1/documents/{doc_id}", response_model=DocumentOut, dependencies=[Depends(auth_read)])
     def get_document(doc_id: str):
         doc = kb.get_document(doc_id)
         if doc is None:
             raise HTTPException(status_code=404, detail="文档不存在")
         return _doc_out(doc, include_text=True)
 
-    @app.delete("/v1/documents/{doc_id}", dependencies=[Depends(auth)])
+    @app.delete("/v1/documents/{doc_id}", dependencies=[Depends(auth_admin)])
     def delete_document(doc_id: str):
-        ok = kb.delete_document(doc_id)
+        ok = kb.delete_document(doc_id, actor="api")
         if not ok:
             raise HTTPException(status_code=404, detail="文档不存在")
         return JSONResponse({"deleted": doc_id})
 
-    @app.post("/v1/documents/{doc_id}/hide", dependencies=[Depends(auth)])
+    @app.post("/v1/documents/{doc_id}/hide", dependencies=[Depends(auth_admin)])
     def hide_document(doc_id: str):
-        if not kb.hide_document(doc_id):
+        if not kb.hide_document(doc_id, actor="api"):
             raise HTTPException(status_code=404, detail="文档不存在")
         return {"hidden": doc_id}
 
-    @app.post("/v1/documents/{doc_id}/unhide", dependencies=[Depends(auth)])
+    @app.post("/v1/documents/{doc_id}/unhide", dependencies=[Depends(auth_admin)])
     def unhide_document(doc_id: str):
-        if not kb.unhide_document(doc_id):
+        if not kb.unhide_document(doc_id, actor="api"):
             raise HTTPException(status_code=404, detail="文档不存在")
         return {"unhidden": doc_id}
 
-    @app.post("/v1/documents/{doc_id}/refresh", response_model=IngestResponse, dependencies=[Depends(auth)])
+    @app.post("/v1/documents/{doc_id}/refresh", response_model=IngestResponse, dependencies=[Depends(auth_admin)])
     def refresh_document(doc_id: str, req: IngestTextRequest):
         """更新文档内容（= 删除旧文档 + 重新入库，返回新 doc_id）。"""
         try:
@@ -197,23 +213,39 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         return IngestResponse(doc_id=new_id, status="added")
 
     # ---- 统计 / 健康 ----
-    @app.get("/v1/stats", response_model=StatsOut, dependencies=[Depends(auth)])
+    @app.get("/v1/stats", response_model=StatsOut, dependencies=[Depends(auth_read)])
     def stats():
         s = kb.stats()
         return StatsOut(**s)
 
     # ---- 运行时开关 ----
-    @app.get("/v1/settings/flags", dependencies=[Depends(auth)])
+    @app.get("/v1/settings/flags", dependencies=[Depends(auth_read)])
     def get_flags():
         return {"flags": kb.get_flags()}
 
-    @app.put("/v1/settings/flags/{name}", dependencies=[Depends(auth)])
+    @app.put("/v1/settings/flags/{name}", dependencies=[Depends(auth_admin)])
     def set_flag(name: str, req: FlagUpdate):
         try:
-            enabled = kb.set_flag(name, req.enabled)
+            enabled = kb.set_flag(name, req.enabled, actor="api")
         except KBError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"name": name, "enabled": enabled}
+
+    @app.get("/v1/settings/embedding", dependencies=[Depends(auth_read)])
+    def get_embedding():
+        return {"active": kb.get_embedding_manifest()}
+
+    @app.get("/v1/answer-log", dependencies=[Depends(auth_admin)])
+    def get_answer_log(after_id: int = 0, limit: int = 100):
+        return {"answers": kb.list_answers(after_id, min(max(limit, 1), 500))}
+
+    @app.get("/v1/audit-log", dependencies=[Depends(auth_admin)])
+    def get_audit_log(after_id: int = 0, limit: int = 100):
+        return {"entries": kb.list_audit(after_id, min(max(limit, 1), 500))}
+
+    @app.post("/v1/governance/backfill", dependencies=[Depends(auth_admin)])
+    def backfill_governance():
+        return {"created": kb.backfill_governance(actor="api")}
 
     @app.get("/v1/health")
     def health():

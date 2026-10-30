@@ -224,6 +224,9 @@ class Indexer:
             self.governance.emit_event(
                 doc_id, "ingest", {"scope": scope, "collection": collection}
             )
+            self.governance.increment_manifest_docs(
+                self.settings.embedding_manifest, 1
+            )
         return doc_id
 
     # ---- 管理 ----
@@ -237,6 +240,9 @@ class Indexer:
         if self.governance is not None:
             self.governance.mark_deleted(doc_id)
             self.governance.emit_event(doc_id, "delete")
+            self.governance.increment_manifest_docs(
+                self.settings.embedding_manifest, -1
+            )
         media_dir = self.settings.media_root / doc_id
         if media_dir.exists():
             shutil.rmtree(media_dir, ignore_errors=True)

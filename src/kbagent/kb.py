@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,14 @@ class KnowledgeBase:
         self._vector_store = vector_store or make_vector_store(self.settings)
         self._doc_store = doc_store or make_document_store(self.settings)
         self.governance = GovernanceStore(self.settings.documents_db)
+        self.manifest_id = self.settings.embedding_manifest
+        self.governance.upsert_manifest(
+            self.manifest_id,
+            model=self.settings.embedding_model,
+            chunker_version=self.settings.chunker_version,
+            collection=self.settings.default_collection,
+        )
+        self.governance.activate_manifest(self.manifest_id)
         self.flags = FeatureFlags(
             self.settings.documents_db,
             defaults={
@@ -163,11 +172,17 @@ class KnowledgeBase:
         doc_id: str,
         collection: str | None = None,
         include_hidden: bool = False,
+        actor: str = "local",
     ) -> bool:
         with self._lock:
             if not include_hidden and not self._is_doc_visible(doc_id):
                 return False
-            return self._indexer.delete_document(doc_id, collection)
+            ok = self._indexer.delete_document(doc_id, collection)
+            if ok:
+                self.governance.record_audit(
+                    "document.delete", doc_id, actor=actor
+                )
+            return ok
 
     def update_document(
         self,
@@ -219,7 +234,7 @@ class KnowledgeBase:
     ) -> list[dict[str, Any]]:
         return self.governance.list_events(after_id, limit, unprocessed_only)
 
-    def hide_document(self, doc_id: str) -> bool:
+    def hide_document(self, doc_id: str, actor: str = "local") -> bool:
         with self._lock:
             doc = self._doc_store.get(doc_id)
             if doc is None:
@@ -231,9 +246,10 @@ class KnowledgeBase:
             self.governance.upsert_meta(meta)
             self._doc_store.set_status(doc_id, "hidden")
             self.governance.emit_event(doc_id, "hide")
+            self.governance.record_audit("document.hide", doc_id, actor=actor)
             return True
 
-    def unhide_document(self, doc_id: str) -> bool:
+    def unhide_document(self, doc_id: str, actor: str = "local") -> bool:
         with self._lock:
             doc = self._doc_store.get(doc_id)
             if doc is None:
@@ -245,6 +261,7 @@ class KnowledgeBase:
             self.governance.upsert_meta(meta)
             self._doc_store.set_status(doc_id, "active")
             self.governance.emit_event(doc_id, "unhide")
+            self.governance.record_audit("document.unhide", doc_id, actor=actor)
             return True
 
     def stats(self) -> dict[str, Any]:
@@ -264,7 +281,41 @@ class KnowledgeBase:
         return self.flags.get(name)
 
     def set_flag(self, name: str, enabled: bool, actor: str = "local") -> bool:
-        return self.flags.set(name, enabled, actor=actor)
+        value = self.flags.set(name, enabled, actor=actor)
+        self.governance.record_audit(
+            "flag.set", name, actor=actor, detail={"enabled": value}
+        )
+        return value
+
+    # ================= 观测 / 回填 =================
+    def get_embedding_manifest(self) -> dict[str, Any] | None:
+        return self.governance.get_active_manifest()
+
+    def list_answers(self, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        return self.governance.list_answers(after_id, limit)
+
+    def list_audit(self, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        return self.governance.list_audit(after_id, limit)
+
+    def backfill_governance(self, actor: str = "local") -> int:
+        """为旧文档补充 docs_meta（缺失时按文档字段生成）。"""
+        created = 0
+        for doc in self._doc_store.list():
+            if self.governance.get_meta(doc.doc_id) is None:
+                self.governance.upsert_meta(
+                    DocMeta(
+                        doc_id=doc.doc_id,
+                        content_hash=doc.content_hash,
+                        scope=doc.scope,
+                        status=doc.status,
+                    )
+                )
+                created += 1
+        if created:
+            self.governance.record_audit(
+                "governance.backfill", actor=actor, detail={"created": created}
+            )
+        return created
 
     # ================= 检索 =================
     def search(
@@ -318,7 +369,8 @@ class KnowledgeBase:
         include_hidden: bool = False,
     ) -> Answer:
         with self._lock:
-            return self._pipeline.ask(
+            started = time.perf_counter()
+            answer = self._pipeline.ask(
                 query,
                 top_k=top_k,
                 where=where,
@@ -328,6 +380,28 @@ class KnowledgeBase:
                 intent=intent,
                 include_hidden=include_hidden,
             )
+            try:
+                self.governance.log_answer(
+                    query=query,
+                    answer=answer.text,
+                    rewritten_query=str(answer.meta.get("rewritten_query", "")),
+                    retrieved=[
+                        {
+                            "doc_id": s.doc_id,
+                            "title": s.title,
+                            "score": s.score,
+                        }
+                        for s in answer.sources
+                    ],
+                    citations=[s.doc_id for s in answer.sources],
+                    meta=answer.meta,
+                    confidence=answer.meta.get("confidence"),
+                    refusal_reason=answer.meta.get("refusal_reason"),
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            except Exception:
+                pass
+            return answer
 
     # ================= 工具 =================
     def rebuild_reranker(self) -> None:

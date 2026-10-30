@@ -8,7 +8,12 @@ from kbagent.config import Settings
 from helpers import FakeEmbedder, FakeLLM
 
 
-def _make_client(tmp_path, api_key: str = ""):
+def _make_client(
+    tmp_path,
+    api_key: str = "",
+    read_key: str = "",
+    admin_key: str = "",
+):
     settings = Settings(
         storage_dir=tmp_path / "kb",
         embedding_model="unused",
@@ -17,6 +22,8 @@ def _make_client(tmp_path, api_key: str = ""):
         query_rewrite_enabled=False,
         multimodal_enabled=False,
         api_key=api_key,
+        api_read_key=read_key,
+        api_admin_key=admin_key,
         llm_api_key="test",
         llm_base_url="http://localhost:9999/v1",
     )
@@ -114,6 +121,59 @@ def test_runtime_flags_api(tmp_path):
         c.put("/v1/settings/flags/study.unknown", json={"enabled": True}).status_code
         == 400
     )
+
+
+def test_read_and_admin_keys(tmp_path):
+    c = _make_client(tmp_path, read_key="read", admin_key="admin")
+    read = {"X-API-Key": "read"}
+    admin = {"X-API-Key": "admin"}
+
+    assert c.get("/v1/settings/flags", headers=read).status_code == 200
+    assert c.get("/v1/settings/embedding", headers=read).status_code == 200
+    assert c.post("/v1/search", json={"query": "x"}, headers=read).status_code == 200
+    assert (
+        c.post("/v1/ingest", json={"content": "x"}, headers=read).status_code == 401
+    )
+    assert (
+        c.post("/v1/ingest", json={"content": "x"}, headers=admin).status_code == 200
+    )
+    assert (
+        c.put(
+            "/v1/settings/flags/study.enabled",
+            json={"enabled": True},
+            headers=read,
+        ).status_code
+        == 401
+    )
+    assert (
+        c.put(
+            "/v1/settings/flags/study.enabled",
+            json={"enabled": True},
+            headers=admin,
+        ).status_code
+        == 200
+    )
+    assert c.get("/v1/answer-log", headers=read).status_code == 401
+    assert c.get("/v1/audit-log", headers=admin).status_code == 200
+    assert c.get("/v1/audit-log", headers=read).status_code == 401
+
+
+def test_answer_and_audit_logs_api(tmp_path):
+    c = _make_client(tmp_path)
+    doc_id = c.post("/v1/ingest", json={"content": "苹果是水果。"}).json()["doc_id"]
+    c.post("/v1/ask", json={"query": "苹果是什么？"})
+    answers = c.get("/v1/answer-log").json()["answers"]
+    assert answers
+    assert answers[0]["answer"]
+    assert answers[0]["citations"]
+
+    assert c.post(f"/v1/documents/{doc_id}/hide").status_code == 200
+    entries = c.get("/v1/audit-log").json()["entries"]
+    assert any(e["action"] == "document.hide" for e in entries)
+
+    r = c.post("/v1/governance/backfill")
+    assert r.status_code == 200
+    assert r.json()["created"] == 0
 
 
 def test_private_and_hidden_documents_api(tmp_path):

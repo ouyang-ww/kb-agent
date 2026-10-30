@@ -20,8 +20,10 @@ from .kb import KnowledgeBase
 app = typer.Typer(add_completion=False, help="个人知识库 RAG Agent")
 config_app = typer.Typer(help="运行时配置（热切换，无需重启）")
 study_app = typer.Typer(help="学习扩展（可选，默认关闭）")
+governance_app = typer.Typer(help="治理工具")
 app.add_typer(config_app, name="config")
 app.add_typer(study_app, name="study")
+app.add_typer(governance_app, name="governance")
 
 
 def _kb(settings: Settings | None = None) -> KnowledgeBase:
@@ -203,6 +205,41 @@ def events(
     kb = _kb()
     rows = kb.list_events(after_id=after, limit=limit)
     typer.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+
+
+@app.command()
+def embedding():
+    """查看当前激活的 embedding manifest。"""
+    kb = _kb()
+    typer.echo(json.dumps(kb.get_embedding_manifest(), ensure_ascii=False, indent=2))
+
+
+@app.command("answer-log")
+def answer_log(
+    after: int = typer.Option(0, help="只显示 id > after 的记录"),
+    limit: int = typer.Option(50),
+):
+    """查看答案日志。"""
+    kb = _kb()
+    typer.echo(json.dumps(kb.list_answers(after, limit), ensure_ascii=False, indent=2))
+
+
+@app.command("audit-log")
+def audit_log(
+    after: int = typer.Option(0, help="只显示 id > after 的记录"),
+    limit: int = typer.Option(50),
+):
+    """查看审计日志。"""
+    kb = _kb()
+    typer.echo(json.dumps(kb.list_audit(after, limit), ensure_ascii=False, indent=2))
+
+
+@governance_app.command("backfill")
+def governance_backfill():
+    """为旧文档补充 docs_meta（缺失时按文档字段生成）。"""
+    kb = _kb()
+    created = kb.backfill_governance()
+    typer.echo(f"已补充 {created} 条 docs_meta")
 
 
 @app.command()

@@ -140,6 +140,80 @@ def test_governance_store_events_and_cursor(tmp_path):
         store.close()
 
 
+def test_answer_log_recorded(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        kb.ingest_text("向量检索的核心是 embedding。", title="向量")
+        answer = kb.ask("向量检索的核心是什么？")
+        rows = kb.list_answers()
+        assert rows
+        assert rows[0]["query"] == "向量检索的核心是什么？"
+        assert rows[0]["answer"] == answer.text
+        assert rows[0]["citations"]
+        assert rows[0]["latency_ms"] is not None
+    finally:
+        kb.close()
+
+
+def test_audit_log_recorded(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        doc_id = kb.ingest_text("审计测试。", title="审计")
+        kb.hide_document(doc_id)
+        kb.unhide_document(doc_id)
+        kb.set_flag("study.enabled", True)
+        kb.delete_document(doc_id)
+        actions = [e["action"] for e in kb.list_audit()]
+        assert "document.hide" in actions
+        assert "document.unhide" in actions
+        assert "flag.set" in actions
+        assert "document.delete" in actions
+    finally:
+        kb.close()
+
+
+def test_embedding_manifest_and_pointer(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        manifest = kb.get_embedding_manifest()
+        assert manifest is not None
+        assert manifest["id"] == kb.manifest_id
+        assert manifest["model"] == "unused"
+        assert kb.governance.get_pointer("active_embedding") == kb.manifest_id
+
+        kb.ingest_text("manifest 计数测试。", title="计数")
+        manifest = kb.get_embedding_manifest()
+        assert manifest is not None
+        assert manifest["doc_count"] == 1
+    finally:
+        kb.close()
+
+
+def test_backfill_governance_for_legacy_docs(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        kb._doc_store.upsert(
+            Document(
+                doc_id="legacy",
+                title="legacy",
+                full_text="legacy text",
+                scope="default",
+                status="active",
+            )
+        )
+        assert kb.get_doc_meta("legacy") is None
+        assert kb.backfill_governance() == 1
+        meta = kb.get_doc_meta("legacy")
+        assert meta is not None
+        assert meta.doc_id == "legacy"
+        assert kb.backfill_governance() == 0
+        assert any(
+            e["action"] == "governance.backfill" for e in kb.list_audit()
+        )
+    finally:
+        kb.close()
+
+
 def test_document_store_scope_and_status_roundtrip(tmp_path):
     store = SQLiteDocumentStore(tmp_path / "docs.sqlite3")
     try:

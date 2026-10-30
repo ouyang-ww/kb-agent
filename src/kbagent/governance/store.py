@@ -42,6 +42,47 @@ CREATE TABLE IF NOT EXISTS consumer_cursor (
   consumer   TEXT PRIMARY KEY,
   last_event INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS answer_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  query TEXT NOT NULL,
+  rewritten_query TEXT DEFAULT '',
+  retrieved_json TEXT DEFAULT '[]',
+  answer TEXT NOT NULL,
+  citations_json TEXT DEFAULT '[]',
+  meta_json TEXT DEFAULT '{}',
+  confidence TEXT,
+  refusal_reason TEXT,
+  latency_ms INTEGER,
+  feedback INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_answer_log_ts ON answer_log(ts);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  actor TEXT DEFAULT 'local',
+  action TEXT NOT NULL,
+  target TEXT DEFAULT '',
+  detail_json TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+CREATE TABLE IF NOT EXISTS embedding_manifest (
+  id TEXT PRIMARY KEY,
+  model TEXT NOT NULL,
+  revision TEXT DEFAULT '',
+  dim INTEGER NOT NULL DEFAULT 0,
+  normalize INTEGER NOT NULL DEFAULT 1,
+  chunker_version TEXT NOT NULL DEFAULT 'c1',
+  collection TEXT NOT NULL DEFAULT 'personal',
+  status TEXT NOT NULL DEFAULT 'active',
+  doc_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  activated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS runtime_pointer (
+  name TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 """
 
 
@@ -211,6 +252,197 @@ class GovernanceStore:
                 (consumer, int(last_event)),
             )
             self._conn.commit()
+
+    # ---- answer_log ----
+    def log_answer(
+        self,
+        query: str,
+        answer: str,
+        rewritten_query: str = "",
+        retrieved: list[dict[str, Any]] | None = None,
+        citations: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+        confidence: str | None = None,
+        refusal_reason: str | None = None,
+        latency_ms: int | None = None,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO answer_log(
+                  ts, query, rewritten_query, retrieved_json,
+                  answer, citations_json, meta_json, confidence,
+                  refusal_reason, latency_ms
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    _now(),
+                    query,
+                    rewritten_query,
+                    json.dumps(retrieved or [], ensure_ascii=False),
+                    answer,
+                    json.dumps(citations or [], ensure_ascii=False),
+                    json.dumps(meta or {}, ensure_ascii=False),
+                    confidence,
+                    refusal_reason,
+                    latency_ms,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_answers(self, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM answer_log WHERE id > ? ORDER BY id LIMIT ?",
+                (after_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "ts": row["ts"],
+                "query": row["query"],
+                "rewritten_query": row["rewritten_query"],
+                "retrieved": json.loads(row["retrieved_json"] or "[]"),
+                "answer": row["answer"],
+                "citations": json.loads(row["citations_json"] or "[]"),
+                "meta": json.loads(row["meta_json"] or "{}"),
+                "confidence": row["confidence"],
+                "refusal_reason": row["refusal_reason"],
+                "latency_ms": row["latency_ms"],
+                "feedback": row["feedback"],
+            }
+            for row in rows
+        ]
+
+    # ---- audit_log ----
+    def record_audit(
+        self,
+        action: str,
+        target: str = "",
+        actor: str = "local",
+        detail: dict[str, Any] | None = None,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO audit_log(ts, actor, action, target, detail_json) VALUES (?,?,?,?,?)",
+                (_now(), actor, action, target, json.dumps(detail or {}, ensure_ascii=False)),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_audit(self, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM audit_log WHERE id > ? ORDER BY id LIMIT ?",
+                (after_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "ts": row["ts"],
+                "actor": row["actor"],
+                "action": row["action"],
+                "target": row["target"],
+                "detail": json.loads(row["detail_json"] or "{}"),
+            }
+            for row in rows
+        ]
+
+    # ---- embedding manifest / runtime pointer ----
+    def upsert_manifest(
+        self,
+        manifest_id: str,
+        model: str,
+        chunker_version: str,
+        collection: str,
+        revision: str = "",
+        dim: int = 0,
+        normalize: bool = True,
+        status: str = "active",
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO embedding_manifest(
+                  id, model, revision, dim, normalize, chunker_version,
+                  collection, status, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                  model=excluded.model,
+                  revision=excluded.revision,
+                  dim=excluded.dim,
+                  normalize=excluded.normalize,
+                  chunker_version=excluded.chunker_version,
+                  collection=excluded.collection,
+                  status=excluded.status
+                """,
+                (
+                    manifest_id,
+                    model,
+                    revision,
+                    int(dim),
+                    int(bool(normalize)),
+                    chunker_version,
+                    collection,
+                    status,
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+
+    def activate_manifest(self, manifest_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE embedding_manifest SET status = 'inactive' WHERE id != ?",
+                (manifest_id,),
+            )
+            self._conn.execute(
+                "UPDATE embedding_manifest SET status = 'active', activated_at = ? WHERE id = ?",
+                (_now(), manifest_id),
+            )
+            self.set_pointer("active_embedding", manifest_id)
+            self._conn.commit()
+
+    def get_manifest(self, manifest_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM embedding_manifest WHERE id = ?", (manifest_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_active_manifest(self) -> dict[str, Any] | None:
+        pointer = self.get_pointer("active_embedding")
+        return self.get_manifest(pointer) if pointer else None
+
+    def increment_manifest_docs(self, manifest_id: str, delta: int = 1) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE embedding_manifest
+                SET doc_count = MAX(0, doc_count + ?) WHERE id = ?
+                """,
+                (int(delta), manifest_id),
+            )
+            self._conn.commit()
+
+    def set_pointer(self, name: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO runtime_pointer(name, value) VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET value=excluded.value
+                """,
+                (name, value),
+            )
+            self._conn.commit()
+
+    def get_pointer(self, name: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM runtime_pointer WHERE name = ?", (name,)
+            ).fetchone()
+        return row["value"] if row else None
 
     def close(self) -> None:
         with self._lock:
