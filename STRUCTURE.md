@@ -2,7 +2,7 @@
 
 > 项目版本：**v0.1.0（L1 已交付）**
 > 计划版本：**v4**（见 [PLAN.md](PLAN.md)）
-> 结构快照生成时间：**2026-10-30 16:48:26 CST**
+> 结构快照生成时间：**2026-10-30 16:52:51 CST**
 > 项目路径：`/home/ouyang/deepseek_workspace/default/kb-agent`
 > 说明：已排除 `.git`、`.claude`、`.venv`、`.hf-cache`、`__pycache__`、`.pytest_cache`、`eval/.kb-e2e`、`*.egg-info`、`.env`、`test_history.log`（本地测试记录）等缓存/运行/会话/敏感文件
 
@@ -19,6 +19,7 @@ kb-agent/
 │   ├── knowledge-governance.md
 │   ├── knowledge-graph-and-ontology.md
 │   ├── mvp-l1-to-l3.md
+│   ├── status.md
 │   └── vision.md
 ├── eval/
 │   ├── datasets/
@@ -152,7 +153,7 @@ kb-agent/
 | `tests/` | 110 个测试，覆盖 L1 全部模块 + 存储抽象 + 运行时开关 + 治理/日志/Key 分权 |
 | `examples/` | 组件集成示例 + 示例知识库文档 |
 | `eval/` | 基线评测集与评估报告 |
-| `docs/` | 规划文档：愿景、架构设计、L1→L3 拆解、知识治理、知识图谱学习笔记；`adr/` 架构决策记录；`archive/` 历史计划 |
+| `docs/` | 规划文档：愿景、架构设计、当前进度、L1→L3 拆解、知识治理、知识图谱学习笔记；`adr/` 架构决策记录；`archive/` 历史计划 |
 | `PLAN.md` | 总体计划 v4（L1 回归护栏 + L2/L3 规划） |
 
 ## 计划状态

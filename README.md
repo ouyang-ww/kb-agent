@@ -177,4 +177,4 @@ src/kbagent/
 - [ ] **L4 知识伙伴**：目标驱动、主动建议、跨笔记综述、教-回
 - [ ] **远期**：音频/视频多模态、ragas 等第三方评估框架
 
-规划文档：[愿景](docs/vision.md) · [架构设计](docs/architecture.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [ADR 0001 存储选型](docs/adr/0001-storage.md)
+规划文档：[愿景](docs/vision.md) · [架构设计](docs/architecture.md) · [当前进度](docs/status.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [ADR 0001 存储选型](docs/adr/0001-storage.md)
