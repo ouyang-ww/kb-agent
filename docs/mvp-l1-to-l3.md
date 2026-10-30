@@ -26,6 +26,18 @@
 - **扩展**：概念、题库、队列、周报、教-回，`KB_STUDY_ENABLED=false` 时零影响
 - 扩展失败不阻塞入库与检索；学习数据全部派生、可重建
 - 不新增核心依赖；不修改源文件；默认不通知、不改变日常 CLI / 聊天流程
+- 扩展开关支持运行期热切换，无需重启；关闭不删除数据，重新开启幂等恢复
+
+### 0.2 运行时开关（热切换）
+
+- `KB_STUDY_ENABLED` 只是启动默认值；运行时以 `runtime_flags` 中的 `study.enabled` 为准
+- 粒度：`study.enabled` / `study.concepts` / `study.items` / `study.queue` / `study.weekly` / `study.dashboard` / `study.notifications`
+- 开启：注册 consumer / 调度器，下一次请求可用；**不自动回填历史**
+- 关闭：停止安排新任务，在跑任务在安全点结束；**不删除数据**
+- 重新开启：复用已有派生数据，幂等恢复
+- P0：`runtime_flags` 表 + `FeatureFlags` 服务；业务层不直接改 `Settings`
+- P3/P4：CLI / REST / 聊天入口；聊天只允许白名单 flag，写操作二次确认
+- 高成本动作（回填、批量出题）单独确认，不随开关自动触发
 
 ---
 
@@ -87,6 +99,7 @@
 - `study.sqlite3` 独立库（不复用 `documents.sqlite3`；除学习历史外均可重建）
 - 版本化 migration（`schema_version` 表）
 - `src/kbagent/study/` 包骨架 + `KB_STUDY_ENABLED` 开关
+- `runtime_flags` 表 + `FeatureFlags` 服务（热切换，无需重启）
 - 幂等：`content_hash = sha256(规范化文本)` + `prompt_version`
 - 统一 LLM 调用封装：重试、限流、JSON 模式、schema 校验
 
@@ -148,6 +161,7 @@
 - 积压与休假处理
 - 校准指标
 - （可选）队列成功率带：目标 70–85%，按近 20 次作答调整难度；关闭时退回纯到期排序
+- （可选）运行时开关入口：`kb config set study.queue false`、`PUT /v1/settings/flags/{name}`
 
 **验收**：
 
@@ -162,6 +176,7 @@
 - 卫生指标：孤儿、重复、未处理合并建议、覆盖率
 - 可选：链接建议（"这两篇可能相关"）
 - 周报增加三个反思问题：以为会但不会的概念 / 重复出现的错误 / 下周在哪个场景用一次
+- （可选）聊天管理工具：management 意图 + 白名单 + 二次确认
 
 **验收**：周报数字与数据库查询一致；主人每周会看一次；地图能一眼看出"下周该学什么"。
 
@@ -490,6 +505,8 @@ kb study outline import <file.yaml>
 kb study report [--weekly|--monthly]
 kb study items review                  # 被标记/待审题
 kb study stats
+kb config get/set <flag>               # 运行时开关
+kb study enable/disable                # 学习扩展总开关
 ```
 
 ### 8.4 REST
@@ -502,13 +519,15 @@ GET  /v1/study/concepts/{id}
 GET  /v1/study/map
 GET  /v1/study/report/weekly
 POST /v1/study/items/{id}/flag
+GET  /v1/settings/flags
+PUT  /v1/settings/flags/{name}
 ```
 
 ### 8.5 配置
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `KB_STUDY_ENABLED` | false | 总开关，默认不影响现有行为 |
+| `KB_STUDY_ENABLED` | false | 启动默认值；运行时以 `study.enabled` 为准 |
 | `KB_STUDY_DAILY_MINUTES` | 10 | 每日时间预算 |
 | `KB_STUDY_NEW_PER_DAY` | 1 | 每天新概念上限 |
 | `KB_STUDY_ITEMS_PER_DOC` | 4 | 每篇出题上限 |
@@ -604,6 +623,7 @@ nodes:
 - 源文件哈希不变
 - 派生库可重建，重建后指纹一致（除作答历史）
 - 关闭 `KB_STUDY_ENABLED` 后，L1 行为与性能不变
+- 开关热切换不阻塞核心；关闭扩展不删除数据
 - LLM 调用失败不阻塞入库主流程（后处理可重试）
 
 ---
@@ -620,6 +640,7 @@ nodes:
 | 隐私顾虑 | 不愿把笔记发给云端 | 本地模型选项；按目录排除；抽取前提示 |
 | 过度设计 | 花两周做可视化 | 先文本视图；地图只在 P4 做最小版 |
 | 功能膨胀 / 耦合 | 扩展侵入核心流程、默认打扰 | 单向依赖；默认关闭；独立开关；核心回归测试 |
+| 热切换不一致 | 开关与后台任务不同步 | 单一 Flag 服务 + 任务边界检查 + 审计 |
 
 ---
 
@@ -639,6 +660,7 @@ nodes:
 - [ ] 14 天试点达标（第 11.2 节）
 - [ ] 现有 L1 测试与评估无退化；源文件零修改
 - [ ] `KB_STUDY_ENABLED=false` 时核心行为不变；扩展失败不阻塞摄入 / 检索
+- [ ] 扩展开关热切换无需重启；关闭后核心行为不变
 
 ---
 

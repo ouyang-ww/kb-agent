@@ -59,6 +59,15 @@ v4 不推翻 v3：**L1 的成功标准保留为回归护栏**，任何 L2/L3 改
 
 规则：**单向依赖**（核心不依赖 `study`）；**默认关闭**（`KB_STUDY_ENABLED=false` 零影响）；**异步派生**（消费 `doc_events`）；**不打扰**（无默认通知）；**不改源文件**；**可独立禁用**；**不新增核心依赖**。
 
+**两种使用模式**：
+
+| 模式 | 开关 | 日常入口 | 切换 |
+| --- | --- | --- | --- |
+| 核心模式（默认） | `study.enabled=false` | 摄入 / 搜索 / 问答 | 默认 |
+| 学习模式（可选） | `study.enabled=true` | 10 分钟队列 + 搜索 / 问答 | CLI / REST / 聊天热切换 |
+
+`KB_STUDY_ENABLED` 只是启动默认值；运行时以 `study.enabled` 为准，**热切换无需重启**。地图、周报、概览页只用于查看，不是日常入口。
+
 ---
 
 ## 2. 分层成功标准
@@ -197,7 +206,7 @@ doc_events → consumers（向量库 / mentions / items / reports / cache / queu
 
 | 阶段 | 内容 | 人日 | 验收 |
 | --- | --- | --- | --- |
-| **P0** | 基础设施 + 治理骨架 + 存储抽象 | 5–8 | 表就绪、开关零影响、隐藏测试 6 条、事件可重放、契约测试通过 |
+| **P0** | 基础设施 + 治理骨架 + 存储抽象 + 运行时开关 | 5–8 | 表就绪、开关零影响、热切换生效、隐藏测试 6 条、事件可重放、契约测试通过 |
 | **P1** | 知识结构（概念 / 出处 / 消歧 / 概念页 / 覆盖度） | 8–12 | 概念准确率、重复率、源文件零修改 |
 | **P2** | 题库与判分（生成 / 校验 / 质量闸门） | 10–15 | 50 题有效率 ≥ 90%、100% 带出处 |
 | **P3** | 学习者模型 + 调度 + 每日队列 | 8–12 | 7 天自测、队列 < 15 分钟、可解释 |
@@ -206,13 +215,14 @@ doc_events → consumers（向量库 / mentions / items / reports / cache / queu
 
 总计约 **7–10 周**（业余）或 **3.5–4.5 周**（全职）。详细拆解见 [mvp-l1-to-l3.md](docs/mvp-l1-to-l3.md)。
 
-P1–P4 的学习能力都是**可选扩展**，默认关闭；P0 核心与治理必须保持无扩展依赖。P2/P3 的低成本扩展包括 own-words / contrast 题型、错因标签、成功率带、轻量焦点。
+P1–P4 的学习能力都是**可选扩展**，默认关闭；P0 核心与治理必须保持无扩展依赖。P2/P3 的低成本扩展包括 own-words / contrast 题型、错因标签、成功率带、轻量焦点。聊天管理工具在 P3/P4 接入，使用白名单 + 二次确认。
 
 ### 6.2 P0 交付清单
 
 学习侧：
 
 - `study.sqlite3` + 版本化 migration + `KB_STUDY_ENABLED`
+- `runtime_flags` 表 + `FeatureFlags` 服务（热切换，无需重启）
 - `content_hash` + `prompt_version` 幂等
 - LLM 调用封装（重试 / 限流 / JSON 模式 / schema 校验）
 
@@ -297,6 +307,44 @@ L1 配置保持不变（`KB_EMBEDDING_MODEL` / `KB_CHUNK_SIZE` / `KB_RERANK_*` /
 
 **接口要求**：`VectorStore` / `DocumentStore` / `StudyStore` 三个 Protocol + 工厂 + 契约测试；`where` 过滤改为后端中立模型；chunk 元数据携带 `embedding_manifest_id` / `embedding_model` / `chunker_version`。
 
+### 8.4 运行时开关与热切换
+
+**两层配置**：
+
+| 层 | 例子 | 存储 | 生效 |
+| --- | --- | --- | --- |
+| 启动配置 | 模型、路径、API Key | `.env` / 环境变量 | 重启 |
+| 运行时开关 | `study.enabled`、`study.queue`、`study.notifications` | SQLite `runtime_flags` | 下一次请求 / 调度 |
+
+**开关粒度**：
+
+- `study.enabled`（总开关）
+- `study.concepts` / `study.items` / `study.queue` / `study.weekly` / `study.dashboard` / `study.notifications`
+- 回填、批量出题等高成本动作不是开关，而是需确认的一次性命令
+
+**语义**：
+
+- 开启：注册 consumer / 调度器，下一次请求可用；**不自动回填历史**
+- 关闭：停止安排新任务；在跑任务在安全点结束；**不删除数据**
+- 重新开启：复用已有派生数据，幂等恢复
+- 变更审计：记录 actor / time / old → new
+
+**实现**：
+
+- `runtime_flags` 表 + `FeatureFlags` 服务（内存缓存 + 版本号）
+- 业务层从 `FeatureFlags` 读取，不直接改 `Settings`
+- 单进程内存缓存即可；多进程后续用轮询或 pub/sub
+- 修复 `RAGPipeline.ask()` 临时修改共享 `Settings` 的并发隐患
+
+**入口**：
+
+- CLI：`kb config get/set <flag>`、`kb study enable/disable`
+- REST：`GET /v1/settings/flags`、`PUT /v1/settings/flags/{name}`
+- 聊天：`management` 意图 + 白名单工具 + 二次确认
+- 聊天不可修改安全 / 隐私 / 密钥类配置
+
+**阶段**：P0 建表与服务；P3/P4 接 CLI / REST / 聊天。
+
 ---
 
 ## 9. 边界、降级与隐私
@@ -335,6 +383,7 @@ L1 配置保持不变（`KB_EMBEDDING_MODEL` / `KB_CHUNK_SIZE` / `KB_RERANK_*` /
 | 隐私 | 明确出境范围、本地模型选项、排除机制 |
 | 维护成本 | 全派生、幂等、增量、可重建 |
 | 功能膨胀 / 耦合 | 单向依赖 + 默认关闭 + 独立开关 + 核心回归测试 |
+| 热切换不一致 | 开关状态与后台任务不同步 | 单一 Flag 服务 + 任务边界检查 + 审计 |
 
 开放决策：
 
