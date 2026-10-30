@@ -176,7 +176,7 @@
 - 卫生指标：孤儿、重复、未处理合并建议、覆盖率
 - 可选：链接建议（"这两篇可能相关"）
 - 周报增加三个反思问题：以为会但不会的概念 / 重复出现的错误 / 下周在哪个场景用一次
-- （可选）聊天管理工具：management 意图 + 白名单 + 二次确认
+- （可选）聊天管理工具：management 意图 + 白名单 + 二次确认；仅内部管理命令，不引入通用工具
 
 **验收**：周报数字与数据库查询一致；主人每周会看一次；地图能一眼看出"下周该学什么"。
 
@@ -522,6 +522,8 @@ POST /v1/study/items/{id}/flag
 GET  /v1/settings/flags
 PUT  /v1/settings/flags/{name}
 ```
+
+> 外部组件使用只读 Key（search/ask）；ingest/delete/refresh 需 admin Key；`where` / `collection` 走白名单并强制合并 scope。
 
 ### 8.5 配置
 

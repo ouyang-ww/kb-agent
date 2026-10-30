@@ -7,6 +7,7 @@ Python 实现的知识库 RAG Agent（包 `kbagent`，CLI `kb`），两种用途
 
 核心能力：数据清洗、子母文档、Cross-Encoder 重排、意图识别与查询改写、评估体系（Recall@k / Accuracy / Faithfulness 等）、多模态（图片）RAG。
 
+> 定位：个人可部署的知识库助手 / 知识库组件，不是通用自主 agent；不执行 shell、HTTP、文件系统或任意代码。
 > 设计原则：核心保持轻量（摄入 / 整理 / 检索 / 问答）；学习能力是可选扩展，默认关闭、失败不阻塞核心。
 
 ## 快速开始
