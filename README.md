@@ -55,6 +55,8 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 
 ## 架构与数据流
 
+完整的系统上下文、分层、模块、时序与数据流见 [docs/architecture.md](docs/architecture.md)。
+
 ```
 写入：loaders → cleaner → chunker(子chunk挂doc_id) → 嵌入 → Chroma(子) + SQLite(父全文)
 读取：意图识别 → query改写 → 检索top-N → 重排top-k → 父文档扩写 → 编号引用 → LLM → Answer
@@ -156,4 +158,4 @@ src/kbagent/
 - [ ] **L4 知识伙伴**：目标驱动、主动建议、跨笔记综述、教-回
 - [ ] **远期**：音频/视频多模态、ragas 等第三方评估框架
 
-规划文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [ADR 0001 存储选型](docs/adr/0001-storage.md)
+规划文档：[愿景](docs/vision.md) · [架构设计](docs/architecture.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [ADR 0001 存储选型](docs/adr/0001-storage.md)
