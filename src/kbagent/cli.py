@@ -67,11 +67,18 @@ def ingest(
     collection: Optional[str] = typer.Option(None, help="集合名（默认 KB_DEFAULT_COLLECTION）"),
     force: bool = typer.Option(False, help="内容相同也强制重建"),
     no_recursive: bool = typer.Option(False, help="不递归子目录"),
+    scope: Optional[str] = typer.Option(None, help="可见范围：default / private / secret"),
 ):
     """导入文件/目录到知识库（md/txt/pdf，自动去重）。"""
     kb = _kb()
     t0 = time.perf_counter()
-    report = kb.ingest(path, collection=collection, force=force, recursive=not no_recursive)
+    report = kb.ingest(
+        path,
+        collection=collection,
+        force=force,
+        recursive=not no_recursive,
+        scope=scope,
+    )
     cost = time.perf_counter() - t0
     typer.echo(f"新增 {len(report.added)} 篇，跳过 {len(report.skipped)} 篇，失败 {len(report.failed)} 篇（耗时 {cost:.1f}s）")
     for did in report.added:
@@ -88,12 +95,14 @@ def search(
     collection: Optional[str] = typer.Option(None),
     no_rerank: bool = typer.Option(False, help="关闭重排"),
     no_rewrite: bool = typer.Option(False, help="关闭查询改写"),
+    include_hidden: bool = typer.Option(False, "--include-hidden", help="包含隐藏/私有文档"),
 ):
     """语义检索（纯检索，不生成答案）。"""
     kb = _kb()
     hits = kb.search(
         query, top_k=top_k, collection=collection,
         rerank=not no_rerank, rewrite=not no_rewrite,
+        include_hidden=include_hidden,
     )
     if not hits:
         typer.echo("未找到相关内容")
@@ -114,12 +123,14 @@ def ask(
     collection: Optional[str] = typer.Option(None),
     no_rerank: bool = typer.Option(False),
     no_rewrite: bool = typer.Option(False),
+    include_hidden: bool = typer.Option(False, "--include-hidden", help="包含隐藏/私有文档"),
 ):
     """RAG 问答（带出处引用）。"""
     kb = _kb()
     ans = kb.ask(
         query, top_k=top_k, collection=collection,
         rerank=not no_rerank, rewrite=not no_rewrite,
+        include_hidden=include_hidden,
     )
     typer.echo(ans.text)
     typer.echo("")
@@ -136,10 +147,11 @@ def ask(
 @app.command()
 def list(
     collection: Optional[str] = typer.Option(None),
+    include_hidden: bool = typer.Option(False, "--include-hidden", help="包含隐藏/私有文档"),
 ):
     """列出知识库文档。"""
     kb = _kb()
-    docs = kb.list_documents(collection)
+    docs = kb.list_documents(collection, include_hidden=include_hidden)
     if not docs:
         typer.echo("知识库为空")
         raise typer.Exit(0)
@@ -152,13 +164,45 @@ def list(
 def delete(
     doc_id: str = typer.Argument(...),
     collection: Optional[str] = typer.Option(None),
+    include_hidden: bool = typer.Option(False, "--include-hidden", help="允许删除隐藏/私有文档"),
 ):
     """删除文档（级联删除子 chunk 与图片）。"""
     kb = _kb()
-    ok = kb.delete_document(doc_id, collection)
+    ok = kb.delete_document(doc_id, collection, include_hidden=include_hidden)
     typer.echo(f"已删除 {doc_id}" if ok else f"文档不存在: {doc_id}", err=not ok)
     if not ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def hide(doc_id: str = typer.Argument(...)):
+    """隐藏文档（不再出现在检索/列表/问答中）。"""
+    kb = _kb()
+    ok = kb.hide_document(doc_id)
+    typer.echo(f"已隐藏 {doc_id}" if ok else f"文档不存在: {doc_id}", err=not ok)
+    if not ok:
+        raise typer.Exit(1)
+
+
+@app.command()
+def unhide(doc_id: str = typer.Argument(...)):
+    """恢复隐藏文档。"""
+    kb = _kb()
+    ok = kb.unhide_document(doc_id)
+    typer.echo(f"已恢复 {doc_id}" if ok else f"文档不存在: {doc_id}", err=not ok)
+    if not ok:
+        raise typer.Exit(1)
+
+
+@app.command()
+def events(
+    after: int = typer.Option(0, help="只显示 id > after 的事件"),
+    limit: int = typer.Option(50),
+):
+    """查看治理事件（ingest / hide / unhide / delete）。"""
+    kb = _kb()
+    rows = kb.list_events(after_id=after, limit=limit)
+    typer.echo(json.dumps(rows, ensure_ascii=False, indent=2))
 
 
 @app.command()

@@ -49,6 +49,7 @@ class RAGPipeline:
         rerank: bool | None = None,
         rewrite: bool | None = None,
         intent: bool | None = None,
+        include_hidden: bool = False,
     ) -> Answer:
         top_k = top_k or self.settings.top_k
         rerank_on = self.settings.rerank_enabled if rerank is None else rerank
@@ -89,7 +90,11 @@ class RAGPipeline:
         # 检索候选 → 重排 → top-k
         candidates_n = self.settings.rerank_candidates if rerank_on else top_k
         candidates = self.retriever.search(
-            plan.rewritten_query, top_k=max(candidates_n, 1), where=where, collection=collection
+            plan.rewritten_query,
+            top_k=max(candidates_n, 1),
+            where=where,
+            collection=collection,
+            include_hidden=include_hidden,
         )
         if rerank_on:
             hits = self.reranker.rerank(plan.rewritten_query, candidates, top_k=top_k)

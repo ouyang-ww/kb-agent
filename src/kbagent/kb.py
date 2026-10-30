@@ -16,6 +16,7 @@ from .errors import NotFoundError
 from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
+from .governance import DocMeta, GovernanceStore, is_visible
 from .ingestion.indexer import IngestReport, Indexer
 from .models import Answer, Document, RetrievalHit
 from .retrieval.parent_expander import ParentExpander
@@ -54,6 +55,7 @@ class KnowledgeBase:
         )
         self._vector_store = vector_store or make_vector_store(self.settings)
         self._doc_store = doc_store or make_document_store(self.settings)
+        self.governance = GovernanceStore(self.settings.documents_db)
         self.flags = FeatureFlags(
             self.settings.documents_db,
             defaults={
@@ -81,7 +83,12 @@ class KnowledgeBase:
             ignore_proxy=self.settings.ignore_http_proxy,
         )
         self._query_processor = QueryProcessor(self._llm, self.settings)
-        self._retriever = Retriever(self._embedder, self._vector_store, self.settings)
+        self._retriever = Retriever(
+            self._embedder,
+            self._vector_store,
+            self.settings,
+            doc_visibility=self._is_doc_visible,
+        )
         self._parent_expander = ParentExpander(
             self._doc_store,
             max_parent_chars=self.settings.max_parent_chars,
@@ -99,6 +106,7 @@ class KnowledgeBase:
             self._vector_store,
             self._doc_store,
             vision_indexer=self._vision_indexer,
+            governance=self.governance,
         )
         self._pipeline = RAGPipeline(
             self.settings,
@@ -116,10 +124,15 @@ class KnowledgeBase:
         collection: str | None = None,
         force: bool = False,
         recursive: bool = True,
+        scope: str | None = None,
     ) -> IngestReport:
         with self._lock:
             return self._indexer.ingest_path(
-                path, collection=collection, force=force, recursive=recursive
+                path,
+                collection=collection,
+                force=force,
+                recursive=recursive,
+                scope=scope,
             )
 
     def ingest_text(
@@ -131,6 +144,7 @@ class KnowledgeBase:
         collection: str | None = None,
         metadata: dict | None = None,
         force: bool = False,
+        scope: str | None = None,
     ) -> str | None:
         with self._lock:
             return self._indexer.ingest_text(
@@ -141,24 +155,97 @@ class KnowledgeBase:
                 collection=collection,
                 metadata=metadata,
                 force=force,
+                scope=scope,
             )
 
-    def delete_document(self, doc_id: str, collection: str | None = None) -> bool:
+    def delete_document(
+        self,
+        doc_id: str,
+        collection: str | None = None,
+        include_hidden: bool = False,
+    ) -> bool:
         with self._lock:
+            if not include_hidden and not self._is_doc_visible(doc_id):
+                return False
             return self._indexer.delete_document(doc_id, collection)
 
     def update_document(
-        self, doc_id: str, new_content: str, **kwargs
+        self,
+        doc_id: str,
+        new_content: str,
+        include_hidden: bool = False,
+        **kwargs,
     ) -> str | None:
         with self._lock:
+            if not include_hidden and not self._is_doc_visible(doc_id):
+                raise NotFoundError(f"文档不存在: {doc_id}")
             return self._indexer.update_document(doc_id, new_content, **kwargs)
 
     # ================= 读取 =================
-    def get_document(self, doc_id: str) -> Document | None:
-        return self._doc_store.get(doc_id)
+    def get_document(
+        self, doc_id: str, include_hidden: bool = False
+    ) -> Document | None:
+        doc = self._doc_store.get(doc_id)
+        if doc is None:
+            return None
+        if not include_hidden and not self._is_doc_visible(doc_id):
+            return None
+        return doc
 
-    def list_documents(self, collection: str | None = None) -> list[Document]:
-        return self._doc_store.list(collection)
+    def list_documents(
+        self, collection: str | None = None, include_hidden: bool = False
+    ) -> list[Document]:
+        docs = self._doc_store.list(collection)
+        if include_hidden:
+            return docs
+        return [d for d in docs if self._is_doc_visible(d.doc_id)]
+
+    # ================= 治理 =================
+    def _is_doc_visible(self, doc_id: str) -> bool:
+        meta = self.governance.get_meta(doc_id)
+        if meta is not None:
+            return is_visible(meta)
+        doc = self._doc_store.get(doc_id)
+        return bool(doc and not doc.is_hidden)
+
+    def get_doc_meta(self, doc_id: str) -> DocMeta | None:
+        return self.governance.get_meta(doc_id)
+
+    def list_events(
+        self,
+        after_id: int = 0,
+        limit: int = 100,
+        unprocessed_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self.governance.list_events(after_id, limit, unprocessed_only)
+
+    def hide_document(self, doc_id: str) -> bool:
+        with self._lock:
+            doc = self._doc_store.get(doc_id)
+            if doc is None:
+                return False
+            meta = self.governance.get_meta(doc_id) or DocMeta(
+                doc_id=doc_id, content_hash=doc.content_hash, scope=doc.scope
+            )
+            meta.status = "hidden"
+            self.governance.upsert_meta(meta)
+            self._doc_store.set_status(doc_id, "hidden")
+            self.governance.emit_event(doc_id, "hide")
+            return True
+
+    def unhide_document(self, doc_id: str) -> bool:
+        with self._lock:
+            doc = self._doc_store.get(doc_id)
+            if doc is None:
+                return False
+            meta = self.governance.get_meta(doc_id) or DocMeta(
+                doc_id=doc_id, content_hash=doc.content_hash, scope=doc.scope
+            )
+            meta.status = "active"
+            self.governance.upsert_meta(meta)
+            self._doc_store.set_status(doc_id, "active")
+            self.governance.emit_event(doc_id, "unhide")
+            return True
 
     def stats(self) -> dict[str, Any]:
         return self._indexer.stats()
@@ -188,6 +275,7 @@ class KnowledgeBase:
         collection: str | None = None,
         rerank: bool | None = None,
         rewrite: bool | None = None,
+        include_hidden: bool = False,
     ) -> list[RetrievalHit]:
         top_k = top_k or self.settings.top_k
         rerank_on = self.settings.rerank_enabled if rerank is None else rerank
@@ -205,7 +293,11 @@ class KnowledgeBase:
 
         candidates_n = self.settings.rerank_candidates if rerank_on else top_k
         hits = self._retriever.search(
-            q, top_k=max(candidates_n, 1), where=where, collection=collection
+            q,
+            top_k=max(candidates_n, 1),
+            where=where,
+            collection=collection,
+            include_hidden=include_hidden,
         )
         if rerank_on:
             hits = self._reranker.rerank(q, hits, top_k=top_k)
@@ -223,6 +315,7 @@ class KnowledgeBase:
         rerank: bool | None = None,
         rewrite: bool | None = None,
         intent: bool | None = None,
+        include_hidden: bool = False,
     ) -> Answer:
         with self._lock:
             return self._pipeline.ask(
@@ -233,6 +326,7 @@ class KnowledgeBase:
                 rerank=rerank,
                 rewrite=rewrite,
                 intent=intent,
+                include_hidden=include_hidden,
             )
 
     # ================= 工具 =================
@@ -246,5 +340,6 @@ class KnowledgeBase:
 
     def close(self) -> None:
         self.flags.close()
+        self.governance.close()
         self._doc_store.close()
         self._vector_store.close()

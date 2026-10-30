@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS documents (
   updated_at TEXT NOT NULL,
   full_text TEXT NOT NULL,
   chunk_ids TEXT DEFAULT '[]',
-  media TEXT DEFAULT '[]'
+  media TEXT DEFAULT '[]',
+  scope TEXT DEFAULT 'default',
+  status TEXT DEFAULT 'active'
 );
 CREATE INDEX IF NOT EXISTS idx_docs_hash ON documents(content_hash);
 CREATE INDEX IF NOT EXISTS idx_docs_collection ON documents(collection);
@@ -44,6 +46,8 @@ _FILTER_FIELDS = frozenset(
         "collection",
         "created_at",
         "updated_at",
+        "scope",
+        "status",
     }
 )
 
@@ -63,13 +67,32 @@ class SQLiteDocumentStore:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.executescript(_SCHEMA)
+            # 旧库迁移：补充 scope / status 列
+            cols = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(documents)")
+            }
+            if "scope" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN scope TEXT DEFAULT 'default'"
+                )
+            if "status" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'active'"
+                )
             self._conn.commit()
 
     # ---- 写 ----
     def upsert(self, doc: Document) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                """
+                INSERT OR REPLACE INTO documents(
+                  doc_id, title, source_path, doc_type, content_hash,
+                  metadata, collection, created_at, updated_at, full_text,
+                  chunk_ids, media, scope, status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
                 (
                     doc.doc_id,
                     doc.title,
@@ -85,6 +108,8 @@ class SQLiteDocumentStore:
                     json.dumps(
                         [m.to_metadata() for m in doc.media], ensure_ascii=False
                     ),
+                    doc.scope,
+                    doc.status,
                 ),
             )
             self._conn.commit()
@@ -93,6 +118,15 @@ class SQLiteDocumentStore:
         with self._lock:
             cur = self._conn.execute(
                 "DELETE FROM documents WHERE doc_id = ?", (doc_id,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_status(self, doc_id: str, status: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE documents SET status = ? WHERE doc_id = ?",
+                (status, doc_id),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -117,6 +151,8 @@ class SQLiteDocumentStore:
             updated_at=row["updated_at"],
             chunk_ids=json.loads(row["chunk_ids"] or "[]"),
             media=media,
+            scope=(row["scope"] or "default") if "scope" in row.keys() else "default",
+            status=(row["status"] or "active") if "status" in row.keys() else "active",
         )
 
     def get(self, doc_id: str) -> Document | None:

@@ -59,6 +59,14 @@ class Document:
     updated_at: str = field(default_factory=_now)
     chunk_ids: list[str] = field(default_factory=list)
     media: list[MediaRef] = field(default_factory=list)
+    scope: str = "default"
+    status: str = "active"
+
+    @property
+    def is_hidden(self) -> bool:
+        from .governance.scope import HIDDEN_SCOPES
+
+        return self.status != "active" or self.scope in HIDDEN_SCOPES
 
     @property
     def chunk_count(self) -> int:

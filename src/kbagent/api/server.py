@@ -63,6 +63,8 @@ def _doc_out(doc, include_text: bool = False) -> DocumentOut:
         updated_at=doc.updated_at,
         chunk_count=doc.chunk_count,
         media=[_media_out(m) for m in doc.media if m is not None],
+        scope=doc.scope,
+        status=doc.status,
         full_text=doc.full_text if include_text else None,
     )
 
@@ -127,6 +129,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
                 doc_type=req.doc_type,
                 collection=req.collection,
                 metadata=req.metadata,
+                scope=req.scope,
             )
         except IngestError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -137,13 +140,14 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
     async def ingest_file(
         file: UploadFile = File(...),
         collection: str | None = None,
+        scope: str | None = None,
     ):
         suffix = Path(file.filename or "").suffix or ".txt"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(await file.read())
             tmp_path = tmp.name
         try:
-            report = kb.ingest(tmp_path, collection=collection)
+            report = kb.ingest(tmp_path, collection=collection, scope=scope)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         if report.added:
@@ -170,6 +174,18 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         if not ok:
             raise HTTPException(status_code=404, detail="文档不存在")
         return JSONResponse({"deleted": doc_id})
+
+    @app.post("/v1/documents/{doc_id}/hide", dependencies=[Depends(auth)])
+    def hide_document(doc_id: str):
+        if not kb.hide_document(doc_id):
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return {"hidden": doc_id}
+
+    @app.post("/v1/documents/{doc_id}/unhide", dependencies=[Depends(auth)])
+    def unhide_document(doc_id: str):
+        if not kb.unhide_document(doc_id):
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return {"unhidden": doc_id}
 
     @app.post("/v1/documents/{doc_id}/refresh", response_model=IngestResponse, dependencies=[Depends(auth)])
     def refresh_document(doc_id: str, req: IngestTextRequest):

@@ -14,6 +14,7 @@ from typing import Any
 from ..config import Settings
 from ..document_store.base import DocumentStore
 from ..errors import IngestError, NotFoundError
+from ..governance import DocMeta, GovernanceStore
 from ..models import Document, MediaRef
 from ..storage.filters import eq
 from ..vectorstore.base import VectorStore
@@ -50,12 +51,14 @@ class Indexer:
         vector_store: VectorStore,
         doc_store: DocumentStore,
         vision_indexer=None,
+        governance: GovernanceStore | None = None,
     ) -> None:
         self.settings = settings
         self.embedder = embedder
         self.vector_store = vector_store
         self.doc_store = doc_store
         self.vision_indexer = vision_indexer
+        self.governance = governance
         self.chunker = Chunker(settings.chunk_size, settings.chunk_overlap)
         self.cleaner = Cleaner()
 
@@ -66,6 +69,7 @@ class Indexer:
         collection: str | None = None,
         force: bool = False,
         recursive: bool = True,
+        scope: str | None = None,
     ) -> IngestReport:
         files = scan_path(Path(path), recursive=recursive)
         report = IngestReport()
@@ -74,6 +78,8 @@ class Indexer:
                 raws = load_file(f)
                 for raw in raws:
                     raw["collection"] = collection or self.settings.default_collection
+                    if scope:
+                        raw["scope"] = scope
                     doc_id = self._ingest_raw(raw, force=force)
                     if doc_id:
                         report.added.append(doc_id)
@@ -92,6 +98,7 @@ class Indexer:
         collection: str | None = None,
         metadata: dict | None = None,
         force: bool = False,
+        scope: str | None = None,
     ) -> str | None:
         raw = {
             "title": title or (Path(source_path).stem if source_path else "untitled"),
@@ -100,6 +107,7 @@ class Indexer:
             "content": content,
             "metadata": metadata or {},
             "collection": collection or self.settings.default_collection,
+            "scope": scope,
         }
         return self._ingest_raw(raw, force=force)
 
@@ -109,6 +117,9 @@ class Indexer:
         source_path = raw.get("source_path", "")
         title = raw.get("title", "untitled")
         content: str = raw.get("content", "")
+        user_meta = raw.get("metadata") or {}
+        scope = raw.get("scope") or user_meta.get("scope") or self.settings.default_scope
+        status = "active"
         if not content.strip():
             raise IngestError("空内容，跳过")
 
@@ -129,11 +140,13 @@ class Indexer:
             return None
 
         chunks = self.chunker.chunk(doc_id, cleaned, base_meta=_scalarize({
-            **raw.get("metadata", {}),
+            **user_meta,
             "doc_id": doc_id,
             "title": title,
             "source_path": source_path,
             "doc_type": raw.get("doc_type", "text"),
+            "scope": scope,
+            "status": status,
         }))
 
         media_refs: list[MediaRef] = []
@@ -165,6 +178,8 @@ class Indexer:
                 "embedding_manifest_id": manifest_id,
                 "embedding_model": self.settings.embedding_model,
                 "chunker_version": self.settings.chunker_version,
+                "scope": scope,
+                "status": status,
                 **(c.media.to_metadata() if c.media else {}),
             }
             for c in chunks
@@ -186,14 +201,29 @@ class Indexer:
             source_path=source_path,
             doc_type=raw.get("doc_type", "text"),
             content_hash=h,
-            metadata={**raw.get("metadata", {}), "clean": clean_result.stats},
+            metadata={**user_meta, "clean": clean_result.stats},
             collection=collection,
             created_at=now,
             updated_at=now,
             chunk_ids=ids,
             media=media_refs,
+            scope=scope,
+            status=status,
         )
         self.doc_store.upsert(doc)
+        if self.governance is not None:
+            self.governance.upsert_meta(
+                DocMeta(
+                    doc_id=doc_id,
+                    content_hash=h,
+                    scope=scope,
+                    status=status,
+                    exclude_from_learning=bool(user_meta.get("exclude_from_learning", False)),
+                )
+            )
+            self.governance.emit_event(
+                doc_id, "ingest", {"scope": scope, "collection": collection}
+            )
         return doc_id
 
     # ---- 管理 ----
@@ -204,6 +234,9 @@ class Indexer:
         coll = collection or doc.collection
         self.vector_store.delete(coll, where=eq("doc_id", doc_id))
         self.doc_store.delete(doc_id)
+        if self.governance is not None:
+            self.governance.mark_deleted(doc_id)
+            self.governance.emit_event(doc_id, "delete")
         media_dir = self.settings.media_root / doc_id
         if media_dir.exists():
             shutil.rmtree(media_dir, ignore_errors=True)
@@ -222,6 +255,7 @@ class Indexer:
             doc_type=kwargs.get("doc_type", doc.doc_type),
             collection=kwargs.get("collection", doc.collection),
             metadata=kwargs.get("metadata", doc.metadata),
+            scope=kwargs.get("scope", doc.scope),
         )
 
     def list_documents(self, collection: str | None = None) -> list[Document]:

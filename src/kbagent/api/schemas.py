@@ -20,6 +20,7 @@ class IngestTextRequest(BaseModel):
     doc_type: str = "text"
     collection: str | None = None
     metadata: dict[str, Any] | None = None
+    scope: str | None = None
 
 
 class MediaOut(BaseModel):
@@ -71,6 +72,8 @@ class DocumentOut(BaseModel):
     updated_at: str = ""
     chunk_count: int = 0
     media: list[MediaOut] = []
+    scope: str = "default"
+    status: str = "active"
     full_text: str | None = None
 
 

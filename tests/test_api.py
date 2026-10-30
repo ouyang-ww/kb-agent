@@ -114,3 +114,32 @@ def test_runtime_flags_api(tmp_path):
         c.put("/v1/settings/flags/study.unknown", json={"enabled": True}).status_code
         == 400
     )
+
+
+def test_private_and_hidden_documents_api(tmp_path):
+    c = _make_client(tmp_path)
+    private = c.post(
+        "/v1/ingest",
+        json={"content": "秘密苹果内容", "title": "秘密", "scope": "private"},
+    ).json()["doc_id"]
+    public = c.post(
+        "/v1/ingest", json={"content": "公开苹果内容", "title": "公开"}
+    ).json()["doc_id"]
+
+    assert [d["doc_id"] for d in c.get("/v1/documents").json()] == [public]
+    assert c.get(f"/v1/documents/{private}").status_code == 404
+    assert (
+        c.post(
+            f"/v1/documents/{private}/refresh", json={"content": "试图刷新"}
+        ).status_code
+        == 404
+    )
+    hits = c.post("/v1/search", json={"query": "苹果", "top_k": 5}).json()["hits"]
+    assert hits
+    assert all(h["doc_id"] != private for h in hits)
+
+    assert c.post(f"/v1/documents/{public}/hide").status_code == 200
+    assert c.get(f"/v1/documents/{public}").status_code == 404
+    assert c.post("/v1/search", json={"query": "苹果", "top_k": 5}).json()["hits"] == []
+    assert c.post(f"/v1/documents/{public}/unhide").status_code == 200
+    assert c.get(f"/v1/documents/{public}").status_code == 200

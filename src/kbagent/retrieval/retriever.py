@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from ..config import Settings
 from ..models import MediaRef, RetrievalHit
 from ..storage.filters import Where
@@ -10,11 +12,16 @@ from ..vectorstore.base import VectorStore
 
 class Retriever:
     def __init__(
-        self, embedder, vector_store: VectorStore, settings: Settings
+        self,
+        embedder,
+        vector_store: VectorStore,
+        settings: Settings,
+        doc_visibility: Callable[[str], bool] | None = None,
     ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store
         self.settings = settings
+        self.doc_visibility = doc_visibility
 
     def search(
         self,
@@ -22,10 +29,20 @@ class Retriever:
         top_k: int,
         where: Where = None,
         collection: str | None = None,
+        include_hidden: bool = False,
     ) -> list[RetrievalHit]:
         collection = collection or self.settings.default_collection
         qv = self.embedder.embed_query(query)
-        results = self.vector_store.query(collection, qv, top_k, where)
+        fetch_k = top_k
+        if not include_hidden and self.doc_visibility is not None:
+            # 多取一些候选，过滤隐藏文档后再截断，降低召回损失
+            fetch_k = max(top_k * 3, top_k)
+        results = self.vector_store.query(collection, qv, fetch_k, where)
+        if not include_hidden and self.doc_visibility is not None:
+            results = [
+                r for r in results
+                if self.doc_visibility((r.metadata or {}).get("doc_id", ""))
+            ][:top_k]
         hits: list[RetrievalHit] = []
         for r in results:
             meta: dict = r.metadata or {}
