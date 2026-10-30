@@ -2,7 +2,7 @@
 
 > 版本：**v4**（2026-10-29）
 > 状态：**L1 已交付（v0.1.0）；L2/L3 规划中，尚未排期**
-> 配套文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md)
+> 配套文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [个人档案管理](docs/personal-archive.md) · [工作知识管理](docs/work-knowledge-management.md)
 > 历史：[v3（L1 交付计划）](docs/archive/PLAN-v3-l1.md)
 
 ---
