@@ -32,6 +32,19 @@ def test_persistence_across_instances(tmp_path):
     second.close()
 
 
+def test_cross_instance_hot_toggle(tmp_path):
+    path = tmp_path / "flags.sqlite3"
+    writer = FeatureFlags(path)
+    reader = FeatureFlags(path)
+    try:
+        assert reader.get("study.enabled") is False
+        writer.set("study.enabled", True)
+        assert reader.get("study.enabled") is True
+    finally:
+        writer.close()
+        reader.close()
+
+
 def test_unknown_flag_rejected(tmp_path):
     flags = FeatureFlags(tmp_path / "flags.sqlite3")
     with pytest.raises(KBError):

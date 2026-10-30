@@ -64,6 +64,7 @@ class FeatureFlags:
             self._defaults.update(defaults)
         self._cache: dict[str, bool] = dict(self._defaults)
         self._version = 0
+        self._data_version = 0
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
@@ -74,6 +75,10 @@ class FeatureFlags:
     def _validate(self, name: str) -> None:
         if name not in KNOWN_FLAGS:
             raise KBError(f"未知的运行时开关: {name!r}")
+
+    def _current_data_version(self) -> int:
+        row = self._conn.execute("PRAGMA data_version").fetchone()
+        return int(row[0]) if row else 0
 
     def refresh(self) -> None:
         """从 SQLite 重新加载（多进程/外部修改时使用）。"""
@@ -87,9 +92,17 @@ class FeatureFlags:
                     cache[row["name"]] = bool(row["enabled"])
             self._cache = cache
             self._version += 1
+            self._data_version = self._current_data_version()
+
+    def _maybe_refresh(self) -> None:
+        """若其他连接提交过，自动重载，实现跨进程热切换。"""
+        with self._lock:
+            if self._current_data_version() != self._data_version:
+                self.refresh()
 
     def get(self, name: str) -> bool:
         self._validate(name)
+        self._maybe_refresh()
         with self._lock:
             return bool(self._cache.get(name, self._defaults[name]))
 
@@ -114,14 +127,17 @@ class FeatureFlags:
             self._conn.commit()
             self._cache[name] = bool(enabled)
             self._version += 1
+            self._data_version = self._current_data_version()
             return bool(enabled)
 
     def all(self) -> dict[str, bool]:
+        self._maybe_refresh()
         with self._lock:
             return {name: bool(self._cache.get(name, self._defaults[name]))
                     for name in KNOWN_FLAGS}
 
     def describe(self) -> dict[str, dict]:
+        self._maybe_refresh()
         with self._lock:
             return {
                 name: {
