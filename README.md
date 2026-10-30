@@ -52,6 +52,7 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 | KB_VISION_LLM_MODEL | 空 | 答案生成时看图（如 qwen-vl / glm-4v） |
 | KB_OCR_ENABLED | false | PaddleOCR（需 `pip install kb-agent[vision]`） |
 | KB_API_KEY | 空 | REST 鉴权（X-API-Key） |
+| KB_STUDY_ENABLED / KB_STUDY_* | false / true | 学习扩展默认值；运行时用 `kb config set` 热切换 |
 
 ## 架构与数据流
 
@@ -125,7 +126,7 @@ kb.delete_document(doc_id); kb.stats()
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 88 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象
+.venv/bin/python -m pytest -q          # 104 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象/治理
 ```
 
 ## 目录结构
@@ -133,7 +134,9 @@ kb.delete_document(doc_id); kb.stats()
 ```
 src/kbagent/
 ├── config.py  models.py  errors.py
+├── flags.py                    # 运行时开关（热切换）
 ├── storage/                    # 中立过滤模型、存储工厂
+├── governance/                 # docs_meta / doc_events / scope
 ├── embedding/local.py          # 本地 CPU 嵌入
 ├── vectorstore/                # VectorStore 协议 + Chroma 适配器
 ├── document_store/             # DocumentStore 协议 + SQLite 适配器

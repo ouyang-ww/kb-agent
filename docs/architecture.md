@@ -121,8 +121,8 @@ flowchart TB
 | `eval/` | 评测集、指标、LLM-as-judge、对比报告 | ✅ |
 | `api/` / `ui/` / `cli.py` | REST / Gradio / CLI | ✅ |
 | `kb.py` | `KnowledgeBase` 门面（线程安全） | ✅ |
-| 治理表 + consumer | `docs_meta`、`doc_events`、scope、`answer_log`、`audit_log` | 🟡 P0 |
-| `FeatureFlags` | `runtime_flags` + 热切换 | 🟡 P0 |
+| 治理表 + consumer | `docs_meta`、`doc_events`、`consumer_cursor`、scope、hide/unhide | ✅ 骨架 2026-10-30（`answer_log` / `audit_log` 待补） |
+| `FeatureFlags` | `runtime_flags` + 热切换 | ✅ 2026-10-30 |
 | `study/` | 概念、题库、队列、掌握度、周报 | ⬜ L2/L3 |
 
 ---
@@ -324,7 +324,7 @@ flowchart LR
 
 | 风险 | 对策 |
 | --- | --- |
-| 隐藏数据被检索/返回 | scope 在存储层强制过滤；输出裁剪 |
+| 隐藏数据被检索/返回 | scope 在检索链路过滤（P0 为 doc-level 后过滤 + chunk 元数据；存储层强制过滤后续强化）；输出裁剪 |
 | 密钥泄漏 | 密钥只在环境变量/keyring；不入 prompt、日志、回答；常量时间比较 |
 | 外部组件滥用 | 只读/admin Key 分权、限流、请求大小、超时、审计 |
 | 上传滥用 | 大小/类型限制、临时文件清理、解析保护 |
@@ -352,8 +352,9 @@ flowchart LR
 | --- | --- |
 | L1 摄入 / 检索 / 问答 / 多模态 / 评估 / CLI / REST / UI | ✅ v0.1.0 |
 | 存储抽象（Protocol / Filter / 工厂 / 契约测试） | ✅ 2026-10-29 |
-| `docs_meta` / `doc_events` / scope / `answer_log` / 审计 | 🟡 P0 |
-| `runtime_flags` / `FeatureFlags` 热切换 | 🟡 P0 |
+| `docs_meta` / `doc_events` / `consumer_cursor` / scope / hide-unhide | ✅ 骨架 2026-10-30 |
+| `runtime_flags` / `FeatureFlags` 热切换 | ✅ 2026-10-30 |
+| `answer_log` / `audit_log` / 过期与冲突检测 | 🟡 P0 后续 |
 | 概念 / 焦点 / 覆盖度 | ⬜ L2 |
 | 题库 / 队列 / 掌握度 / 周报 | ⬜ L3 |
 

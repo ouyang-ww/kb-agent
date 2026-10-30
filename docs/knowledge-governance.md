@@ -1,8 +1,9 @@
 # 知识治理：可信、可控、可演进
 
-> 状态：**设计文档**。与 [PLAN v4](../PLAN.md) 配套；只定义机制，不含代码改动。
+> 状态：**设计文档 + P0 骨架已实现（2026-10-30）**。与 [PLAN v4](../PLAN.md) 配套。
 > 配套：[愿景](./vision.md)、[L1→L3 最小可行闭环拆解](./mvp-l1-to-l3.md)、[知识图谱与本体学习笔记](./knowledge-graph-and-ontology.md)。
 > 覆盖五个问题：**防幻觉、隐藏与抽离、embedding 迁移、知识过期、知识重复。**
+> 实施状态：`docs_meta` / `doc_events` / `consumer_cursor` / scope 过滤 / hide-unhide 已实现；`answer_log`、embedding manifest 表、过期/冲突检测待实现。
 
 ---
 

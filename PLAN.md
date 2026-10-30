@@ -225,18 +225,20 @@ P1–P4 的学习能力都是**可选扩展**，默认关闭；P0 核心与治�
 学习侧：
 
 - `study.sqlite3` + 版本化 migration + `KB_STUDY_ENABLED`
-- `runtime_flags` 表 + `FeatureFlags` 服务（热切换，无需重启）
+- `runtime_flags` 表 + `FeatureFlags` 服务（热切换，无需重启；✅ 2026-10-30）
 - `content_hash` + `prompt_version` 幂等
 - LLM 调用封装（重试 / 限流 / JSON 模式 / schema 校验）
 
 治理侧：
 
-- `docs_meta`、`doc_events`、`consumer_cursor`
-- 检索入口**强制传 scope**
+- `docs_meta`、`doc_events`、`consumer_cursor`（✅ 2026-10-30）
+- 检索入口**强制传 scope**（✅ 骨架：doc-level 可见性过滤 + chunk 元数据）
 - `embedding_manifest` + `runtime_pointer`
 - `answer_log`
-- 隐藏文档自动化测试（`search` / `ask` / `study` 三处均无结果）
+- 隐藏文档自动化测试（`search` / `ask` / `study` 三处均无结果；✅ 2026-10-30）
 - 存储抽象：`DocumentStore` Protocol、工厂、后端中立过滤模型、契约测试（✅ 2026-10-29，见 [ADR 0001](docs/adr/0001-storage.md)）
+
+P0 剩余：`answer_log`、`embedding_manifest` 表 / `runtime_pointer`、管理 Key 与只读 Key 分权。
 
 ---
 
@@ -348,7 +350,7 @@ L1 配置保持不变（`KB_EMBEDDING_MODEL` / `KB_CHUNK_SIZE` / `KB_RERANK_*` /
 
 **边界**：聊天里的管理操作是**内部白名单命令**（查状态、开关 flag、文档管理），不是通用工具调用；不引入 shell / HTTP / 文件系统 / 浏览器 / 代码执行，也不需要沙箱。写操作需二次确认。
 
-**阶段**：P0 建表与服务；P3/P4 接 CLI / REST / 聊天。
+**阶段**：P0 建表与服务（✅ 2026-10-30）；P3/P4 接 CLI / REST / 聊天。
 
 ---
 
