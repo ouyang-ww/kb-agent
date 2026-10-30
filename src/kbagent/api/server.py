@@ -10,12 +10,13 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from ..config import Settings
-from ..errors import IngestError, NotFoundError
+from ..errors import IngestError, KBError, NotFoundError
 from ..kb import KnowledgeBase
 from ..models import MediaRef
 from .schemas import (
     AskResponse,
     DocumentOut,
+    FlagUpdate,
     HitOut,
     IngestResponse,
     IngestTextRequest,
@@ -184,6 +185,19 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
     def stats():
         s = kb.stats()
         return StatsOut(**s)
+
+    # ---- 运行时开关 ----
+    @app.get("/v1/settings/flags", dependencies=[Depends(auth)])
+    def get_flags():
+        return {"flags": kb.get_flags()}
+
+    @app.put("/v1/settings/flags/{name}", dependencies=[Depends(auth)])
+    def set_flag(name: str, req: FlagUpdate):
+        try:
+            enabled = kb.set_flag(name, req.enabled)
+        except KBError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"name": name, "enabled": enabled}
 
     @app.get("/v1/health")
     def health():

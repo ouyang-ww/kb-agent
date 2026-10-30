@@ -86,3 +86,7 @@ class IngestResponse(BaseModel):
     doc_id: str | None = None
     status: str = "added"  # added | skipped
     path: str | None = None
+
+
+class FlagUpdate(BaseModel):
+    enabled: bool

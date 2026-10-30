@@ -11,12 +11,17 @@ import typer
 from typing import Optional
 
 from .config import Settings
+from .errors import KBError
 from .eval.dataset import EvalItem, load_dataset, save_dataset, validate
 from .eval.reports import compare_to_markdown, save_json, save_markdown, single_to_markdown
 from .eval.runner import Evaluator
 from .kb import KnowledgeBase
 
 app = typer.Typer(add_completion=False, help="个人知识库 RAG Agent")
+config_app = typer.Typer(help="运行时配置（热切换，无需重启）")
+study_app = typer.Typer(help="学习扩展（可选，默认关闭）")
+app.add_typer(config_app, name="config")
+app.add_typer(study_app, name="study")
 
 
 def _kb(settings: Settings | None = None) -> KnowledgeBase:
@@ -162,6 +167,57 @@ def stats():
     kb = _kb()
     s = kb.stats()
     typer.echo(json.dumps(s, ensure_ascii=False, indent=2))
+
+
+# ================= 运行时开关 =================
+@config_app.command("get")
+def config_get(name: Optional[str] = typer.Argument(None)):
+    """查看运行时开关；不传名称则列出全部。"""
+    kb = _kb()
+    try:
+        if name:
+            typer.echo("on" if kb.flag(name) else "off")
+            return
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    for key, enabled in kb.get_flags().items():
+        typer.echo(f"{key}={'on' if enabled else 'off'}")
+
+
+@config_app.command("set")
+def config_set(name: str, value: str):
+    """开启/关闭运行时开关：on|off。"""
+    v = value.strip().lower()
+    if v in {"on", "true", "1", "yes", "enable"}:
+        enabled = True
+    elif v in {"off", "false", "0", "no", "disable"}:
+        enabled = False
+    else:
+        raise typer.BadParameter("value 必须是 on 或 off")
+    kb = _kb()
+    try:
+        now = kb.set_flag(name, enabled)
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{name}={'on' if now else 'off'}")
+
+
+@study_app.command("enable")
+def study_enable():
+    """开启学习扩展（不自动回填历史）。"""
+    kb = _kb()
+    kb.set_flag("study.enabled", True)
+    typer.echo("study.enabled=on")
+
+
+@study_app.command("disable")
+def study_disable():
+    """关闭学习扩展（不删除数据）。"""
+    kb = _kb()
+    kb.set_flag("study.enabled", False)
+    typer.echo("study.enabled=off")
 
 
 # ================= 服务 =================

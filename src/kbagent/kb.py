@@ -13,6 +13,7 @@ from .config import Settings
 from .document_store.base import DocumentStore
 from .embedding.local import SentenceTransformerEmbedder
 from .errors import NotFoundError
+from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
 from .ingestion.indexer import IngestReport, Indexer
@@ -53,6 +54,18 @@ class KnowledgeBase:
         )
         self._vector_store = vector_store or make_vector_store(self.settings)
         self._doc_store = doc_store or make_document_store(self.settings)
+        self.flags = FeatureFlags(
+            self.settings.documents_db,
+            defaults={
+                "study.enabled": self.settings.study_enabled,
+                "study.concepts": self.settings.study_concepts,
+                "study.items": self.settings.study_items,
+                "study.queue": self.settings.study_queue,
+                "study.weekly": self.settings.study_weekly,
+                "study.dashboard": self.settings.study_dashboard,
+                "study.notifications": self.settings.study_notifications,
+            },
+        )
         self._llm = llm or LLMClient(
             base_url=self.settings.llm_base_url,
             api_key=self.settings.llm_api_key,
@@ -153,6 +166,19 @@ class KnowledgeBase:
     def collections(self) -> list[str]:
         return self._vector_store.collections()
 
+    # ================= 运行时开关 =================
+    def get_flags(self) -> dict[str, bool]:
+        return self.flags.all()
+
+    def describe_flags(self) -> dict[str, dict]:
+        return self.flags.describe()
+
+    def flag(self, name: str) -> bool:
+        return self.flags.get(name)
+
+    def set_flag(self, name: str, enabled: bool, actor: str = "local") -> bool:
+        return self.flags.set(name, enabled, actor=actor)
+
     # ================= 检索 =================
     def search(
         self,
@@ -219,5 +245,6 @@ class KnowledgeBase:
         )
 
     def close(self) -> None:
+        self.flags.close()
         self._doc_store.close()
         self._vector_store.close()

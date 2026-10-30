@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     # ---- 评估 ----
     eval_judge_model: str = ""
 
+    # ---- 学习扩展默认值（运行时以 runtime_flags 为准）----
+    study_enabled: bool = False
+    study_concepts: bool = True
+    study_items: bool = True
+    study_queue: bool = True
+    study_weekly: bool = True
+    study_dashboard: bool = True
+    study_notifications: bool = False
+    default_scope: str = "default"
+
     # ---- 服务 ----
     api_host: str = "127.0.0.1"
     api_port: int = 8710

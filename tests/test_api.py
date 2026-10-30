@@ -97,3 +97,20 @@ def test_auth_required(tmp_path):
     assert c.get("/v1/stats").status_code == 401
     assert c.get("/v1/stats", headers={"X-API-Key": "wrong"}).status_code == 401
     assert c.get("/v1/stats", headers={"X-API-Key": "secret"}).status_code == 200
+
+
+def test_runtime_flags_api(tmp_path):
+    c = _make_client(tmp_path)
+    r = c.get("/v1/settings/flags")
+    assert r.status_code == 200
+    assert r.json()["flags"]["study.enabled"] is False
+
+    r = c.put("/v1/settings/flags/study.enabled", json={"enabled": True})
+    assert r.status_code == 200
+    assert r.json() == {"name": "study.enabled", "enabled": True}
+    assert c.get("/v1/settings/flags").json()["flags"]["study.enabled"] is True
+
+    assert (
+        c.put("/v1/settings/flags/study.unknown", json={"enabled": True}).status_code
+        == 400
+    )
