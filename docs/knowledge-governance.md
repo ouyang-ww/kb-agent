@@ -3,7 +3,7 @@
 > 状态：**设计文档 + P0 骨架已实现（2026-10-30）**。与 [PLAN v4](../PLAN.md) 配套。
 > 配套：[愿景](./vision.md)、[L1→L3 最小可行闭环拆解](./mvp-l1-to-l3.md)、[知识图谱与本体学习笔记](./knowledge-graph-and-ontology.md)。
 > 覆盖五个问题：**防幻觉、隐藏与抽离、embedding 迁移、知识过期、知识重复。**
-> 实施状态：`docs_meta` / `doc_events` / `consumer_cursor` / scope 过滤 / hide-unhide 已实现；`answer_log`、embedding manifest 表、过期/冲突检测待实现。
+> 实施状态：`docs_meta` / `doc_events` / `consumer_cursor` / scope 过滤 / hide-unhide / `answer_log` / `audit_log` / `embedding_manifest` / `runtime_pointer` / 只读-admin Key 分权已实现（2026-10-30）；过期/冲突检测、严格模式、去重待实现。
 
 ---
 
@@ -584,8 +584,8 @@ CREATE TABLE audit_log (
 
 | 阶段 | 内容 |
 | --- | --- |
-| **P0（必做）** | `docs_meta`、`doc_events`、`consumer_cursor`、`content_hash`、scope 过滤钩子、`embedding_manifest` + 指针、隐藏文档测试 |
-| **P1** | 闸 1 可答性、闸 2 引用契约、级联 consumers（vector/mentions/items/reports）、答案日志、库外评测集 |
+| **P0（已完成 2026-10-30）** | `docs_meta`、`doc_events`、`consumer_cursor`、`content_hash`、scope 过滤、`embedding_manifest` + 指针、`answer_log`、`audit_log`、只读/admin Key、隐藏文档测试 ✅ |
+| **P1** | 闸 1 可答性、闸 2 引用契约、级联 consumers（vector/mentions/items/reports）、库外评测集 |
 | **P2** | 闸 3 声明校验（严格模式）、过期检测与冲突队列、近似去重、题库去重 |
 | **P3+** | 历史查询（as-of）、事实级共识、embedding 迁移演练、段落级隐藏 |
 

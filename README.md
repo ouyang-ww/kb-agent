@@ -51,8 +51,19 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 | KB_MULTIMODAL_ENABLED | true | 图片提取 + 描述（视觉模型） |
 | KB_VISION_LLM_MODEL | 空 | 答案生成时看图（如 qwen-vl / glm-4v） |
 | KB_OCR_ENABLED | false | PaddleOCR（需 `pip install kb-agent[vision]`） |
-| KB_API_KEY | 空 | REST 鉴权（X-API-Key） |
+| KB_API_KEY / KB_API_READ_KEY / KB_API_ADMIN_KEY | 空 | REST 鉴权；`KB_API_KEY` 兼容旧配置，等同 admin |
 | KB_STUDY_ENABLED / KB_STUDY_* | false / true | 学习扩展默认值；运行时用 `kb config set` 热切换 |
+
+## 运行时开关与治理
+
+```bash
+kb config get                              # 查看全部开关
+kb config set study.enabled on             # 热切换，无需重启
+kb hide <doc_id> / kb unhide <doc_id>      # 隐藏 / 恢复文档
+kb events                                  # 治理事件
+kb answer-log / kb audit-log               # 答案日志 / 审计日志
+kb governance backfill                     # 旧文档 docs_meta 回填
+```
 
 ## 架构与数据流
 
@@ -117,16 +128,21 @@ kb.delete_document(doc_id); kb.stats()
 | GET /v1/documents/{doc_id} | 原文档全文（含 media） |
 | DELETE /v1/documents/{doc_id} | 删除（级联） |
 | POST /v1/documents/{doc_id}/refresh | 更新内容 |
+| POST /v1/documents/{doc_id}/hide / unhide | 隐藏 / 恢复 |
+| GET /v1/settings/flags / PUT /v1/settings/flags/{name} | 运行时开关 |
+| GET /v1/settings/embedding | 当前 embedding manifest |
+| GET /v1/answer-log / GET /v1/audit-log | 答案日志 / 审计日志 |
+| POST /v1/governance/backfill | 旧文档 docs_meta 回填 |
 | GET /v1/stats / GET /v1/health | 统计 / 健康检查 |
 
-鉴权：配置 `KB_API_KEY` 后所有业务端点要求 `X-API-Key` 头。
+鉴权：配置 `KB_API_KEY`（等同 admin）或 `KB_API_READ_KEY` / `KB_API_ADMIN_KEY` 后，业务端点要求 `X-API-Key` 头；只读 Key 不能执行入库、删除、开关等管理操作。
 
 完整示例见 `examples/use_as_library.py` 与 `examples/call_api.py`。
 
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 104 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象/治理
+.venv/bin/python -m pytest -q          # 110 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象/治理
 ```
 
 ## 目录结构

@@ -233,12 +233,13 @@ P1–P4 的学习能力都是**可选扩展**，默认关闭；P0 核心与治�
 
 - `docs_meta`、`doc_events`、`consumer_cursor`（✅ 2026-10-30）
 - 检索入口**强制传 scope**（✅ 骨架：doc-level 可见性过滤 + chunk 元数据）
-- `embedding_manifest` + `runtime_pointer`
-- `answer_log`
+- `embedding_manifest` + `runtime_pointer`（✅ 2026-10-30）
+- `answer_log`、`audit_log`（✅ 2026-10-30）
+- 只读 / admin Key 分权（✅ 2026-10-30）
 - 隐藏文档自动化测试（`search` / `ask` / `study` 三处均无结果；✅ 2026-10-30）
 - 存储抽象：`DocumentStore` Protocol、工厂、后端中立过滤模型、契约测试（✅ 2026-10-29，见 [ADR 0001](docs/adr/0001-storage.md)）
 
-P0 剩余：`answer_log`、`embedding_manifest` 表 / `runtime_pointer`、管理 Key 与只读 Key 分权。
+P0 交付清单已完成（2026-10-30）。下一阶段：L2 知识结构。
 
 ---
 

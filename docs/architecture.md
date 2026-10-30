@@ -121,7 +121,7 @@ flowchart TB
 | `eval/` | 评测集、指标、LLM-as-judge、对比报告 | ✅ |
 | `api/` / `ui/` / `cli.py` | REST / Gradio / CLI | ✅ |
 | `kb.py` | `KnowledgeBase` 门面（线程安全） | ✅ |
-| 治理表 + consumer | `docs_meta`、`doc_events`、`consumer_cursor`、scope、hide/unhide | ✅ 骨架 2026-10-30（`answer_log` / `audit_log` 待补） |
+| 治理 + 观测 | `docs_meta`、`doc_events`、`consumer_cursor`、scope、hide/unhide、`answer_log`、`audit_log`、`embedding_manifest` | ✅ 2026-10-30 |
 | `FeatureFlags` | `runtime_flags` + 热切换 | ✅ 2026-10-30 |
 | `study/` | 概念、题库、队列、掌握度、周报 | ⬜ L2/L3 |
 
@@ -132,7 +132,7 @@ flowchart TB
 | 存储 | 内容 | 可重建 |
 | --- | --- | --- |
 | 源文件 | Markdown / PDF / 网页 | ✅ 唯一事实来源 |
-| `documents.sqlite3` | 文档、父文档全文、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`runtime_flags` | 大部分可 |
+| `documents.sqlite3` | 文档、父文档全文、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`embedding_manifest`、`runtime_pointer`、`runtime_flags` | 大部分可 |
 | `study.sqlite3` | `concepts`、`concept_edges`、`mentions`、`items`、`attempts`、`learner_state`、`reviews`、`outline_nodes` | 除 `attempts` / `learner_state` 外可 |
 | Chroma | 子 chunk 向量 + 元数据（`doc_id`、`scope`、`status`、`valid_until`、`manifest_id`） | ✅ |
 | `media/` | 图片等媒体文件 | ✅（从源文件重建） |
@@ -352,9 +352,12 @@ flowchart LR
 | --- | --- |
 | L1 摄入 / 检索 / 问答 / 多模态 / 评估 / CLI / REST / UI | ✅ v0.1.0 |
 | 存储抽象（Protocol / Filter / 工厂 / 契约测试） | ✅ 2026-10-29 |
-| `docs_meta` / `doc_events` / `consumer_cursor` / scope / hide-unhide | ✅ 骨架 2026-10-30 |
+| `docs_meta` / `doc_events` / `consumer_cursor` / scope / hide-unhide | ✅ 2026-10-30 |
 | `runtime_flags` / `FeatureFlags` 热切换 | ✅ 2026-10-30 |
-| `answer_log` / `audit_log` / 过期与冲突检测 | 🟡 P0 后续 |
+| `answer_log` / `audit_log` | ✅ 2026-10-30 |
+| `embedding_manifest` / `runtime_pointer` | ✅ 2026-10-30 |
+| 只读 / admin Key 分权 | ✅ 2026-10-30 |
+| 过期与冲突检测 / 严格模式 / 去重 | 🟡 P2 |
 | 概念 / 焦点 / 覆盖度 | ⬜ L2 |
 | 题库 / 队列 / 掌握度 / 周报 | ⬜ L3 |
 
