@@ -1,6 +1,7 @@
 # 知识治理：可信、可控、可演进
 
 > 状态：**设计文档 + P0 骨架已实现（2026-10-30）**。与 [PLAN v4](../PLAN.md) 配套。
+> 本文的 P0 / P1 / P2 与 [status §5](./status.md) 的治理阶段同名同义。学习阶段叫 L2、S1–S4，不占用这套编号。
 > 配套：[愿景](./vision.md)、[L1→L3 最小可行闭环拆解](./mvp-l1-to-l3.md)、[知识图谱与本体学习笔记](./knowledge-graph-and-ontology.md)。
 > 覆盖五个问题：**防幻觉、隐藏与抽离、embedding 迁移、知识过期、知识重复。**
 > 实施状态：`docs_meta` / `doc_events` / `consumer_cursor` / scope 过滤 / hide-unhide / `answer_log` / `audit_log` / `embedding_manifest` / `runtime_pointer` / 只读-admin Key 分权已实现（2026-10-30）；过期/冲突检测、严格模式、去重待实现。
@@ -13,7 +14,7 @@
 
 | 能力 | 目标 | 主要机制 | 落地阶段 |
 | --- | --- | --- | --- |
-| **可信** | 每个事实性陈述可追溯，无据则明说 | 可答性闸门 / 引用契约 / 声明校验 / 拒答指标 | P1 |
+| **可信** | 每个事实性陈述可追溯，无据则明说 | 可答性闸门 / 引用契约 / 声明校验 / 拒答指标 | P1 闸门与引用；P2 声明校验 |
 | **可控** | 不该出现的内容不出现 | scope 元数据 / 查询过滤 / **级联清理** / 硬抽离 / 审计 | P0 建表，P1 实现 |
 | **可演进** | 模型、事实、内容变化可管理 | embedding manifest / 时效元数据 / 分层去重 | P0 建表，P2 实现 |
 
@@ -287,7 +288,7 @@ kb audit --since 2026-10-01
 - 不同模型的向量**不可比较、不可混用**，必须全量重建索引
 - 查询端和索引端必须使用**同一个模型版本**
 - 可以做到不停机、可评估、可回滚
-- 你的架构优势：**父文档全文在 SQLite**，重建不需要重读源文件
+- 你的重建路径：**重读源文件**（[ADR 0002](./adr/0002-no-original-duplication.md)）。v0.1.0 曾把父全文放在 SQLite，迁移完成后不再依赖这份副本。源文件不在时，该文档的向量索引无法重建。
 
 ### 3.2 版本化清单
 
@@ -585,7 +586,7 @@ CREATE TABLE audit_log (
 | 阶段 | 内容 |
 | --- | --- |
 | **P0（已完成 2026-10-30）** | `docs_meta`、`doc_events`、`consumer_cursor`、`content_hash`、scope 过滤、`embedding_manifest` + 指针、`answer_log`、`audit_log`、只读/admin Key、隐藏文档测试 ✅ |
-| **P1** | 闸 1 可答性、闸 2 引用契约、级联 consumers（vector/mentions/items/reports）、库外评测集 |
+| **P1** | 闸 1 可答性、闸 2 引用契约、级联 consumers（vector/mentions/items/reports）、库外评测集、检索 fail-closed scope |
 | **P2** | 闸 3 声明校验（严格模式）、过期检测与冲突队列、近似去重、题库去重 |
 | **P3+** | 历史查询（as-of）、事实级共识、embedding 迁移演练、段落级隐藏 |
 

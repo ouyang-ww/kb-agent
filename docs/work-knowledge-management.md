@@ -1,6 +1,7 @@
 # 工作知识管理规划：记录层、回顾引擎与办公文件导入
 
-> 状态：**规划文档**，尚未实现。与 [个人档案管理](./personal-archive.md)、[架构评估](./architecture-readiness-personal.md)、[PLAN v4](../PLAN.md) 配套。
+> 状态：**未来扩展，不是当前 MVP**。当前计划以 [PLAN v4 §0.1](../PLAN.md) 为准。本文保留到该模块启动时再用。
+> 与 [个人档案管理](./personal-archive.md)、[架构评估](./architecture-readiness-personal.md)、[PLAN v4](../PLAN.md) 配套。
 >
 > 已确认的约束：
 > 1. **输入以办公文件为主**——Word / Excel / PPT / 纯文本 / Markdown 是主要来源；若后续接入任务工具，仍按"源系统为事实来源、单向导入"处理，v1 不回写。

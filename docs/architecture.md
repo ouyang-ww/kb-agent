@@ -1,19 +1,19 @@
 # kb-agent 架构设计
 
-> 状态：与 [PLAN v4](../PLAN.md) 对齐。L1 已实现；P0 治理/运行时开关、L2/L3 为规划中。
-> 定位：个人可部署的**知识库助手 / 知识库组件**，不是通用自主 agent；不执行 shell、HTTP、文件系统、浏览器或任意代码。
-> 配套：[愿景](./vision.md) · [L1→L3 拆解](./mvp-l1-to-l3.md) · [知识治理](./knowledge-governance.md) · [ADR 0001 存储选型](./adr/0001-storage.md)
+> 状态：与 [PLAN v4](../PLAN.md) 对齐。L1 已实现。2026-11-03 起，MVP 主路径是解耦的学习模块；原件不双写见 [ADR 0002](./adr/0002-no-original-duplication.md)。
+> 定位：本地学习助手，同时是可被 Grok、DeepSeek Harness 调用的知识库组件。不执行 shell、HTTP、文件系统、浏览器或任意代码。打开原文是本机固定动作。
+> 配套：[愿景](./vision.md) · [L1→L3 拆解](./mvp-l1-to-l3.md) · [知识治理](./knowledge-governance.md) · [ADR 0001 存储选型](./adr/0001-storage.md) · [ADR 0002 原件不双写](./adr/0002-no-original-duplication.md)
 
 ---
 
 ## 1. 设计原则
 
-1. **源文件是唯一事实来源**：Markdown / PDF / 网页；所有索引与学习数据都是派生物，可重建
-2. **核心轻量**：摄入、整理、检索、问答始终可用，不依赖学习扩展
-3. **扩展可选**：概念、题库、队列、周报默认关闭，支持热切换，失败不阻塞核心
-4. **单向依赖**：核心不依赖 `study`；`study` 依赖核心
-5. **单机优先 + 组件化**：默认本地部署；通过 REST / Python API 作为其他 AI 的知识库组件
-6. **受控能力面**：管理操作限于白名单命令；不提供通用工具调用
+1. **源文件是唯一事实来源**：Markdown / PDF / 网页。索引与学习数据是派生物。绑定来源的整篇正文不写入应用库，见 ADR 0002
+2. **核心轻量**：摄入、整理、检索、问答始终可用，不依赖学习模块
+3. **学习模块解耦**：题库、队列、掌握度是独立模块。托盘默认开启；库与组件集成默认关闭。失败不阻塞核心
+4. **单向依赖**：核心不依赖 `study`，以后也不依赖工作模块；`study` 依赖核心
+5. **本机优先 + 组件化**：托盘 / 小窗与 CLI 留给人；REST / MCP / Python API 给 Grok、DeepSeek Harness 等调用方。同步通道按多设备预留，MVP 不做移动端
+6. **受控能力面**：管理操作限于白名单命令；不提供通用工具调用。打开原文是本机固定动作
 
 ---
 
@@ -132,7 +132,7 @@ flowchart TB
 | 存储 | 内容 | 可重建 |
 | --- | --- | --- |
 | 源文件 | Markdown / PDF / 网页 | ✅ 唯一事实来源 |
-| `documents.sqlite3` | 文档、父文档全文、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`embedding_manifest`、`runtime_pointer`、`runtime_flags` | 大部分可 |
+| `documents.sqlite3` | 路径、哈希、摘要、切块定位、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`embedding_manifest`、`runtime_pointer`、`runtime_flags`。v0.1.0 仍含父全文，待按 ADR 0002 迁出。无外部原件的 `inline` 正文留在库内 | 索引可从源文件重建 |
 | `study.sqlite3` | `concepts`、`concept_edges`、`mentions`、`items`、`attempts`、`learner_state`、`reviews`、`outline_nodes` | 除 `attempts` / `learner_state` 外可 |
 | Chroma | 子 chunk 向量 + 元数据（`doc_id`、`scope`、`status`、`valid_until`、`manifest_id`） | ✅ |
 | `media/` | 图片等媒体文件 | ✅（从源文件重建） |
@@ -168,7 +168,7 @@ flowchart LR
     CHUNK --> VISION["vision 可选<br/>图片提取 → caption / OCR"]
     VISION --> EMB
     EMB --> CHROMA[("Chroma<br/>子 chunk + 元数据")]
-    CLEAN --> PARENT[("SQLite<br/>父文档全文")]
+    CLEAN --> PARENT[("SQLite<br/>路径 / 摘要 / 定位")]
     PARENT --> META[("docs_meta / doc_events")]
     META -.->|"异步"| CONS["扩展 consumer<br/>概念 / 题目 / 报告"]
 ```
@@ -237,7 +237,7 @@ flowchart LR
 
 **边界**：
 
-- 默认关闭；`study.enabled=false` 时整条链路不运行
+- 默认关闭是库与组件集成的启动值；托盘默认开启学习模块。`study.enabled=false` 时学习链路不运行
 - 开启不自动回填历史；关闭不删数据
 - 焦点感知只影响排序，不限制检索，也不是目标管理
 - 题目必须带出处；质量不达标进入隔离区
@@ -314,9 +314,11 @@ flowchart LR
     KB --> LLM["LLM 可选云端"]
 ```
 
-- 默认单机、本地优先，零外部服务
+- 本机托盘 / 小窗是产品主界面，原文用 Obsidian 或系统默认应用打开
+- CLI、REST、MCP 保留。默认监听 `127.0.0.1`
 - 作为组件时，只读与管理 Key 分离；`where` / `collection` 白名单
-- 不提供通用工具调用，不需要沙箱
+- 同步通道按多设备预留：默关的加密远程同步，以及同 Wi-Fi 配对同步。MVP 不做移动端
+- 不提供通用工具调用，不需要沙箱。打开原文是固定的本机动作
 
 ---
 
@@ -367,6 +369,7 @@ flowchart LR
 
 - 存储：Chroma + SQLite，通过 Protocol 抽象，迁移阈值见 [ADR 0001](./adr/0001-storage.md)
 - 源文件优先：所有索引与学习数据可重建
-- 扩展默认关闭、可热切换、单向依赖
+- 扩展模块可关、可热切换、单向依赖。托盘默认进入学习闭环
+- 原件不双写，见 ADR 0002
 - 不引入通用工具调用；管理操作白名单化
-- 单机优先，REST/Python API 作为组件集成面
+- 本机优先。REST / MCP / Python API 是知识库组件的调用面，供 Grok、DeepSeek Harness 等使用

@@ -5,6 +5,7 @@
 - **决策**：L1–L3 保持 **Chroma + SQLite**，不引入 Milvus / MySQL；通过存储 Protocol 抽象保证后续可迁移
 - **待办**：`StudyStore` Protocol 随学习库 schema 一并设计
 - **相关**：[PLAN v4](../../PLAN.md) · [知识治理](../knowledge-governance.md) · [L1→L3 拆解](../mvp-l1-to-l3.md)
+- **编号**：下文的 P0/P1/P2 是存储改造优先级，不是 status 的治理阶段，也不是学习切片 S1–S4。
 
 ---
 
@@ -13,7 +14,8 @@
 - 单用户、本地优先、长期使用的个人知识助手
 - 目标层级：L1 检索 → L2 知识结构 → L3 学习闭环
 - 数据治理要求：scope 隔离、过期/冲突、重复合并、embedding 迁移
-- 当前实现：Chroma（子 chunk 向量）+ `documents.sqlite3`（父文档全文）
+- 当前实现：Chroma（子 chunk 向量）+ `documents.sqlite3`（v0.1.0 含父文档全文）
+- 目标：父全文迁出，见 [ADR 0002](./0002-no-original-duplication.md)。本 ADR 的引擎选型不变
 
 估算规模：
 

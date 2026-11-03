@@ -1,14 +1,15 @@
 # kb-agent — 个人知识库 RAG Agent
 
-Python 实现的知识库 RAG Agent（包 `kbagent`，CLI `kb`），两种用途：
+Python 实现的本地学习知识助手（包 `kbagent`，CLI `kb`），同时是可供 Grok、DeepSeek Harness 调用的知识库组件。
 
-1. **日常知识检索**：命令行 + Web 聊天界面，答案带出处引用
-2. **组件化集成**：作为另一个 AI agent 项目的知识库检索/管理组件（Python API + REST API）
+1. **学习闭环（当前 MVP 主路径）**：问答、闪卡 / 测验、复习与进度。实现为独立模块，不耦合进检索核心。托盘 / 小窗是产品界面，原文用 Obsidian 或系统默认应用打开
+2. **知识库组件**：CLI + REST + MCP + Python API。学习模块可关；关闭后摄入、检索、问答仍然完整
 
-核心能力：数据清洗、子母文档、Cross-Encoder 重排、意图识别与查询改写、评估体系（Recall@k / Accuracy / Faithfulness 等）、多模态（图片）RAG。
+核心能力：数据清洗、切块、Cross-Encoder 重排、意图识别与查询改写、评估体系（Recall@k / Accuracy / Faithfulness 等）、多模态（图片）RAG。
 
-> 定位：个人可部署的知识库助手 / 知识库组件，不是通用自主 agent；不执行 shell、HTTP、文件系统或任意代码。
-> 设计原则：核心保持轻量（摄入 / 整理 / 检索 / 问答）；学习能力是可选扩展，默认关闭、失败不阻塞核心。
+> 定位见 [PLAN v4 §0.1](PLAN.md)。学习模块解耦扩展；工作模块是未来扩展，不是当前 MVP。
+> 绑定 Vault / 文件夹的原件不写入应用库，见 [ADR 0002](docs/adr/0002-no-original-duplication.md)。抽取与总结可选本地模型，否则默认 DeepSeek。
+> 不执行 shell、HTTP、文件系统或任意代码。打开原文是本机固定动作。
 
 ## 快速开始
 
@@ -28,8 +29,10 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 
 # 服务与界面
 .venv/bin/kb serve          # REST API → http://127.0.0.1:8710 (docs: /docs)
-.venv/bin/kb chat           # Gradio 聊天界面 → http://127.0.0.1:7860
+.venv/bin/kb chat           # Gradio，当前的开发界面 → http://127.0.0.1:7860
 ```
+
+产品主界面按计划是托盘或小窗，尚未实现。Gradio 保留给开发和回归。
 
 > 首次使用本地嵌入模型会下载约 100MB（`BAAI/bge-small-zh-v1.5`），重排模型约 1.1GB（`BAAI/bge-reranker-base`，可设 `KB_RERANK_ENABLED=false` 关闭）。国内网络可先 `export HF_ENDPOINT=https://hf-mirror.com`。
 
@@ -70,11 +73,13 @@ kb governance backfill                     # 旧文档 docs_meta 回填
 完整的系统上下文、分层、模块、时序与数据流见 [docs/architecture.md](docs/architecture.md)。
 
 ```
-写入：loaders → cleaner → chunker(子chunk挂doc_id) → 嵌入 → Chroma(子) + SQLite(父全文)
+写入：loaders → cleaner → chunker(子 chunk 挂 doc_id) → 嵌入 → Chroma（切块）
+      绑定来源的正文留在源文件，扩写时按路径回读
+      v0.1.0 的库仍含 SQLite 父全文，迁移见 ADR 0002
 读取：意图识别 → query改写 → 检索top-N → 重排top-k → 父文档扩写 → 编号引用 → LLM → Answer
 ```
 
-- **子母文档**：向量库只存子 chunk（携带 `doc_id`）；父文档全文在 SQLite 文档库。`kb.get_document(doc_id)` 回查原文档，检索结果可溯源。
+- **子母切块**：向量库存切块（携带 `doc_id`）。绑定来源的整篇正文留在源文件，扩写时回读；v0.1.0 仍把父全文放在 SQLite，迁移见 [ADR 0002](docs/adr/0002-no-original-duplication.md)。
 - **意图识别**：LLM 单次调用返回 `{intent, rewritten_query}`（kb_question / smalltalk / management / out_of_scope），失败自动降级为规则关键词。
 - **重排**：bge-reranker Cross-Encoder，模型加载失败自动降级为相似度排序。
 - **多模态**：PDF/markdown 内图片 → 提取 → 视觉 LLM 描述（+可选 OCR）→ 图文单元与文本同库检索；配置 `KB_VISION_LLM_MODEL` 后答案生成可看图，否则用描述文本。
@@ -167,12 +172,21 @@ src/kbagent/
 
 ## Roadmap
 
-按 [PLAN v4](PLAN.md) 的层级推进（L1 已交付）：
+按 [status §5](docs/status.md) 推进（L1 与治理 P0 已交付）：
 
-- [x] **L1 检索助手**：清洗、子母文档、重排、多模态、评估（v0.1.0）
-- [ ] **P0 治理骨架**：`docs_meta` / `doc_events` / scope 隔离 / embedding manifest
-- [ ] **L2 知识管理员（可选扩展）**：概念与关系抽取、去重合并、缺口分析、概念页
-- [ ] **L3 学习教练（可选扩展）**：学习者模型、题库、间隔复习、每日队列、周报
+- [x] **L1 检索助手**：清洗、子母切块、重排、多模态、评估（v0.1.0）。父全文入库将按 ADR 0002 改掉
+- [x] **P0 治理骨架**：`docs_meta` / `doc_events` / scope 隔离 / embedding manifest
+- [ ] **原件不双写**：迁出父全文，扩写回读源文件
+- [ ] **P1 可信与治理**：可答性闸门、引用契约、级联 consumers、库外拒答评测、检索 fail-closed scope
+- [ ] **P2 严格模式**：声明校验、过期/冲突检测、近似去重
+- [ ] **学习切片**：硬编码题、作答、下次到期。不抽取概念。托盘 / 小窗可在此起步
+- [ ] **本机 MCP**，以及用 Obsidian 或系统默认应用打开原文
+- [ ] **同步通道预留**：许可模型与稳定 id。不做移动端，也不做完整传输
+- [ ] **L2 知识结构**：概念与关系抽取、去重、缺口分析、概念页
+- [ ] **S1 正式出题**：依赖 L2
+- [ ] **人生时间线前置**：敏感范围只走本地模型或拒绝；问答不进明文日志
+- [ ] **人生时间线**：事实、事件、健康
+- [ ] **未来扩展**：工作知识管理模块
 - [ ] **按需**：混合检索（BM25 + 向量）、更多向量库后端（FAISS / LanceDB）
 - [ ] **L4 知识伙伴**：目标驱动、主动建议、跨笔记综述、教-回
 - [ ] **远期**：音频/视频多模态、ragas 等第三方评估框架
