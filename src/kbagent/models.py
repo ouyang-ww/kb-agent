@@ -47,9 +47,16 @@ class MediaRef:
 SOURCE_BOUND = "bound"  # Vault / 文件夹；正文只在源文件
 SOURCE_INLINE = "inline"  # 无外部原件，正文留在应用库
 SOURCE_ORPHANED = "orphaned_copy"  # 源文件已不在，库内副本保留待用户处理
+SOURCE_DIVERGED = "diverged"  # 源文件还在，但与已入库哈希不一致；保留正文，待重新入库
 SOURCE_LEGACY = "legacy"  # 迁移前的旧行，仍可能带父全文
 SOURCE_KINDS = frozenset(
-    {SOURCE_BOUND, SOURCE_INLINE, SOURCE_ORPHANED, SOURCE_LEGACY}
+    {
+        SOURCE_BOUND,
+        SOURCE_INLINE,
+        SOURCE_ORPHANED,
+        SOURCE_DIVERGED,
+        SOURCE_LEGACY,
+    }
 )
 
 
@@ -84,9 +91,11 @@ class ChunkLocation:
 class Document:
     """父文档记录。
 
-    ``bound``：不保存整篇正文，扩写时按路径回读源文件。
+    ``bound``：不保存整篇正文，扩写时按路径回读源文件（须哈希一致）。
     ``inline``：无外部原件，正文留在应用库。
     ``orphaned_copy``：源文件已丢失，库内副本保留到用户处理。
+    ``diverged``：源文件还在，但与已入库哈希不一致。不用 ``orphaned_copy``，
+    因为文件并没有丢；保留正文，等重新入库后再删。
     """
 
     doc_id: str

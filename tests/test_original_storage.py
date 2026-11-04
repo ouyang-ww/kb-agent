@@ -10,12 +10,12 @@ from kbagent.api.server import create_app
 from kbagent.config import Settings
 from kbagent.document_store.sqlite_store import SQLiteDocumentStore
 from kbagent.governance.originals import migrate_document
-from kbagent.ingestion.chunker import Chunker
 from kbagent.ingestion.loaders import content_hash
 from kbagent.ingestion.source_text import read_cleaned_source
 from kbagent.kb import KnowledgeBase
 from kbagent.models import (
     SOURCE_BOUND,
+    SOURCE_DIVERGED,
     SOURCE_INLINE,
     SOURCE_LEGACY,
     SOURCE_ORPHANED,
@@ -162,6 +162,7 @@ def test_parent_expansion_reads_source_not_sqlite(tmp_path):
         title="笔记",
         full_text="SENTINEL_SHOULD_NOT_LEAK",
         source_path=str(path),
+        content_hash=content_hash(cleaned),
         source_kind=SOURCE_BOUND,
         chunk_locations=[ChunkLocation("d1#0000", 0, len(cleaned), "")],
     )
@@ -179,7 +180,8 @@ def test_parent_expansion_reads_source_not_sqlite(tmp_path):
 
     path.write_text("文件已改成 NEW_ON_DISK。", encoding="utf-8")
     ctx = ParentExpander(_MemStore(doc), max_parent_chars=4000).expand([hit])
-    assert "NEW_ON_DISK" in ctx[0].text
+    assert ctx[0].text == hit.text
+    assert "NEW_ON_DISK" not in ctx[0].text
     assert "SENTINEL_SHOULD_NOT_LEAK" not in ctx[0].text
 
     path.unlink()
@@ -245,25 +247,26 @@ def test_migrate_existing_source_drops_body_and_keeps_hash(tmp_path):
         path = tmp_path / "keep.md"
         text = "迁移前已经写入库里的父文档全文。"
         path.write_text(text, encoding="utf-8")
+        digest = content_hash(read_cleaned_source(path))
         kb._doc_store.upsert(
             Document(
                 doc_id="old-keep",
                 title="keep",
                 full_text=text,
                 source_path=str(path),
-                content_hash="stored-hash",
+                content_hash=digest,
                 source_kind=SOURCE_LEGACY,
             )
         )
         report = kb.migrate_parent_bodies()
         assert report["bound"] == 1
+        assert "re_ingest_hint" not in report
         doc = kb.get_document("old-keep")
         assert doc is not None
         assert doc.full_text == ""
         assert doc.source_kind == SOURCE_BOUND
         assert doc.source_path == str(path)
-        assert doc.content_hash == "stored-hash"
-        assert doc.chunk_locations
+        assert doc.content_hash == digest
         assert any(
             entry["action"] == "governance.migrate_parents" for entry in kb.list_audit()
         )
@@ -281,7 +284,7 @@ def test_migrate_existing_source_drops_body_and_keeps_hash(tmp_path):
         ctx = kb._parent_expander.expand(
             [
                 RetrievalHit(
-                    chunk_id=doc.chunk_locations[0].chunk_id,
+                    chunk_id="old-keep#0000",
                     doc_id=doc.doc_id,
                     text=cleaned[:12],
                     score=1.0,
@@ -297,12 +300,13 @@ def test_migrate_fills_hash_when_missing(tmp_path):
     kb = _kb(tmp_path)
     try:
         path = tmp_path / "hashed.md"
-        path.write_text("需要补上内容哈希。", encoding="utf-8")
+        text = "需要补上内容哈希。"
+        path.write_text(text, encoding="utf-8")
         kb._doc_store.upsert(
             Document(
                 doc_id="no-hash",
                 title="h",
-                full_text="库内旧副本",
+                full_text=text,
                 source_path=str(path),
                 content_hash="",
                 source_kind=SOURCE_LEGACY,
@@ -314,6 +318,143 @@ def test_migrate_fills_hash_when_missing(tmp_path):
         assert doc.full_text == ""
         assert doc.content_hash == content_hash(read_cleaned_source(path))
         assert doc.source_kind == SOURCE_BOUND
+    finally:
+        kb.close()
+
+
+def test_migrate_drifted_file_keeps_body(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        indexed = "索引时的正文，向量按这篇切块。"
+        path = tmp_path / "drift.md"
+        path.write_text(indexed, encoding="utf-8")
+        cleaned_indexed = read_cleaned_source(path)
+        digest = content_hash(cleaned_indexed)
+        path.write_text("磁盘已被改成另一篇。", encoding="utf-8")
+        kb._doc_store.upsert(
+            Document(
+                doc_id="drift",
+                title="drift",
+                full_text=cleaned_indexed,
+                source_path=str(path),
+                content_hash=digest,
+                source_kind=SOURCE_LEGACY,
+                collection="personal",
+            )
+        )
+        report = kb.migrate_parent_bodies()
+        assert report["diverged"] == 1
+        assert report["bound"] == 0
+        assert "重新入库" in report["re_ingest_hint"]
+        doc = kb.get_document("drift")
+        assert doc is not None
+        assert doc.source_kind == SOURCE_DIVERGED
+        assert doc.full_text == cleaned_indexed
+        assert doc.content_hash == digest
+        assert doc.source_path == str(path)
+
+        again = kb.migrate_parent_bodies()
+        assert again["unchanged"] == 1
+        assert again["diverged"] == 0
+        assert kb.get_document("drift").full_text == cleaned_indexed
+
+        path.write_text(indexed, encoding="utf-8")
+        promoted = kb.migrate_parent_bodies()
+        assert promoted["bound"] == 1
+        restored = kb.get_document("drift")
+        assert restored.source_kind == SOURCE_BOUND
+        assert restored.full_text == ""
+        assert restored.content_hash == digest
+    finally:
+        kb.close()
+
+
+def test_migrate_locations_follow_stored_chunks(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        text = ("甲" * 40) + ("乙" * 40) + ("丙" * 40)
+        path = tmp_path / "aligned.md"
+        path.write_text(text, encoding="utf-8")
+        cleaned = read_cleaned_source(path)
+        pieces = {
+            "aligned#0000": cleaned[10:35],
+            "aligned#0001": cleaned[70:100],
+        }
+        ids = list(pieces)
+        kb._vector_store.add(
+            "personal",
+            ids,
+            kb._embedder.embed_texts(list(pieces.values())),
+            list(pieces.values()),
+            [
+                {"doc_id": "aligned", "section": "甲段", "char_start": 10, "char_end": 35},
+                {"doc_id": "aligned", "section": "乙段"},
+            ],
+        )
+        kb._doc_store.upsert(
+            Document(
+                doc_id="aligned",
+                title="aligned",
+                full_text=cleaned,
+                source_path=str(path),
+                content_hash=content_hash(cleaned),
+                source_kind=SOURCE_LEGACY,
+                collection="personal",
+                chunk_ids=ids,
+            )
+        )
+        kb.settings.chunk_size = 16
+        report = kb.migrate_parent_bodies()
+        assert report["bound"] == 1
+        doc = kb.get_document("aligned")
+        assert doc is not None
+        assert doc.full_text == ""
+        by_id = {loc.chunk_id: loc for loc in doc.chunk_locations}
+        assert set(by_id) == set(pieces)
+        assert by_id["aligned#0000"].start == 10
+        assert by_id["aligned#0000"].end == 35
+        assert cleaned[by_id["aligned#0000"].start : by_id["aligned#0000"].end] == pieces["aligned#0000"]
+        assert cleaned[by_id["aligned#0001"].start : by_id["aligned#0001"].end] == pieces["aligned#0001"]
+        assert by_id["aligned#0001"].start == 70
+        stored = {
+            item.id: item.document
+            for item in kb._vector_store.get("personal", ids=ids)
+        }
+        for chunk_id, piece in pieces.items():
+            assert stored[chunk_id] == piece
+            loc = by_id[chunk_id]
+            assert cleaned[loc.start : loc.end] == stored[chunk_id]
+    finally:
+        kb.close()
+
+
+def test_expansion_hash_mismatch_falls_back_to_chunk(tmp_path):
+    kb = _kb(tmp_path)
+    try:
+        path = tmp_path / "note.md"
+        original = "入库时的父文档。向量切块停在这句话。"
+        path.write_text(original, encoding="utf-8")
+        doc_id = kb.ingest(path).added[0]
+        doc = kb.get_document(doc_id)
+        assert doc is not None
+        assert doc.source_kind == SOURCE_BOUND
+        chunk = doc.chunk_locations[0]
+        hit_text = read_cleaned_source(path)[chunk.start : chunk.end]
+        path.write_text("DRIFTED_FILE 不应进入提示词。", encoding="utf-8")
+        ctx = kb._parent_expander.expand(
+            [
+                RetrievalHit(
+                    chunk_id=chunk.chunk_id,
+                    doc_id=doc_id,
+                    text=hit_text,
+                    score=1.0,
+                    char_start=chunk.start,
+                    char_end=chunk.end,
+                )
+            ]
+        )
+        assert ctx[0].text == hit_text
+        assert "DRIFTED_FILE" not in ctx[0].text
     finally:
         kb.close()
 
@@ -417,7 +558,7 @@ def test_legacy_schema_rows_default_to_legacy(tmp_path):
     assert got.full_text == "旧库里的父全文"
     assert got.summary == ""
     assert got.chunk_locations == []
-    outcome = migrate_document(got, Chunker())
+    outcome = migrate_document(got)
     assert outcome == "inline"
     store.upsert(got)
     saved = store.get("legacy-row")

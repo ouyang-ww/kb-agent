@@ -36,6 +36,7 @@ v0.1.0 把父文档全文放进 SQLite，检索时用这份副本做父文档扩
 
 - 新写入遵守本决策：绑定源文件不把整篇正文写入 SQLite；无外部原件的提交标为 `inline` 并保留正文。
 - 父文档扩写回读源文件，按切块定位截取。`KB_MAX_PARENT_CHARS` 限制这次从源文件读入的窗口。
-- 已入库父全文用 `kb governance migrate-parents`（REST：`POST /v1/governance/migrate-parents`，admin Key）。源文件仍在则写下路径与哈希并删除库内全文；源文件不在则保留全文并标为 `orphaned_copy`。
+- 已入库父全文用 `kb governance migrate-parents`（REST：`POST /v1/governance/migrate-parents`，admin Key）。源文件哈希与已入库哈希一致才删除库内全文并标为 `bound`；不一致则保留正文并标为 `diverged`（文件还在，需要重新入库）。源文件不在则标为 `orphaned_copy`。切块定位对齐已有向量，不重新切块。
+- 父文档扩写回读前核对 `content_hash`。不一致或无法核对时退回切块文本，不把漂移后的文件送进提示词。
 - 检索质量护栏（Recall / Accuracy / Faithfulness）继续有效。父全文改回读是有意变更，不把它当成 L1 回归失败。
 - 用外部应用打开原文、以及对外响应去掉绝对路径，仍留在后续的本机打开原文能力，不在这次迁移里。

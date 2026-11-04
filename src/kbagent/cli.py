@@ -244,7 +244,7 @@ def governance_backfill():
 
 @governance_app.command("migrate-parents")
 def governance_migrate_parents():
-    """迁出已入库父全文：源文件仍在则改为回读，缺失则标为 orphaned_copy。"""
+    """迁出已入库父全文。哈希一致才改为回读；不一致标为 diverged。"""
     kb = _kb()
     report = kb.migrate_parent_bodies()
     typer.echo(json.dumps(report, ensure_ascii=False))
@@ -432,21 +432,20 @@ def eval_build(
 
 
 def _parent_excerpt(doc, limit: int) -> str:
-    """评测抽样用的正文窗口。绑定文档回读源文件，不依赖库内父全文。"""
+    """评测抽样用的正文窗口。绑定文档只在哈希一致时回读源文件。"""
     from .errors import IngestError
+    from .ingestion.source_text import read_verified_source
     from .models import SOURCE_BOUND
-    from .retrieval.source_window import read_parent_window
+    from .retrieval.source_window import slice_parent_window
 
     if doc.source_kind == SOURCE_BOUND and doc.source_path:
         try:
-            return read_parent_window(
-                doc.source_path,
-                start=0,
-                end=limit,
-                max_chars=limit,
-            )
+            cleaned = read_verified_source(doc.source_path, doc.content_hash or "")
         except (OSError, IngestError):
+            cleaned = None
+        if cleaned is None:
             return doc.summary
+        return slice_parent_window(cleaned, start=0, end=limit, max_chars=limit)
     if doc.full_text:
         return doc.full_text[:limit]
     return doc.summary
