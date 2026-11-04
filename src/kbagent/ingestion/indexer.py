@@ -25,7 +25,7 @@ from ..models import (
     MediaRef,
 )
 from ..storage.filters import eq
-from ..vectorstore.base import VectorStore
+from ..vectorstore.base import StoredVector, VectorStore
 from .chunker import Chunker
 from .cleaner import Cleaner
 from .loaders import content_hash, doc_id_for, load_file, scan_path
@@ -62,6 +62,17 @@ def _scalarize(meta: dict) -> dict:
         for k, v in meta.items()
         if isinstance(v, (str, int, float, bool)) or v is None
     }
+
+
+def _plain_meta(meta: dict | None) -> dict:
+    """回滚写入用的元数据：去掉 None 和 Chroma 读回来的 numpy 标量。"""
+    out: dict = {}
+    for key, value in (meta or {}).items():
+        if isinstance(value, bool) or isinstance(value, (str, int, float)):
+            out[key] = value
+        elif hasattr(value, "item"):
+            out[key] = value.item()
+    return out
 
 
 class Indexer:
@@ -163,16 +174,16 @@ class Indexer:
         cleaned = clean_result.text
         h = content_hash(cleaned)
 
-        existing = self.doc_store.get_by_hash(h)
-        if existing and not force:
-            return None  # 去重跳过
-        if existing and force:
-            self.delete_document(existing.doc_id, collection)
-
+        # 同一 source_path 的 doc_id 稳定。先算出 id，再决定跳过还是替换，
+        # 避免内容变更时直接 add：Chroma 对已有 id 不覆盖，chunk 变少会留下旧块。
         identity = source_path or f"{collection}:{title}:{h}"
         doc_id = doc_id_for(identity)
-        doc = self.doc_store.get(doc_id)
-        if doc and doc.content_hash == h and not force:
+
+        duplicate = self.doc_store.get_by_hash(h)
+        if duplicate and not force:
+            return None  # 去重跳过
+        prior = self.doc_store.get(doc_id)
+        if prior and prior.content_hash == h and not force:
             return None
 
         chunks = self.chunker.chunk(doc_id, cleaned, base_meta=_scalarize({
@@ -231,13 +242,11 @@ class Indexer:
             for c in chunks
         ]
 
-        # 批量嵌入
+        # 嵌入放在任何删除之前。清洗 / 嵌入失败时，旧文档和旧向量都还在。
         embeddings: list[list[float]] = []
         batch = self.settings.embedding_batch_size
         for i in range(0, len(texts), batch):
             embeddings.extend(self.embedder.embed_texts(texts[i : i + batch]))
-
-        self.vector_store.add(collection, ids, embeddings, texts, metas)
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # 绑定原件只留在文件系统。inline / orphaned_copy 才把正文写入应用库。
@@ -251,7 +260,7 @@ class Indexer:
             content_hash=h,
             metadata={**user_meta, "clean": clean_result.stats},
             collection=collection,
-            created_at=now,
+            created_at=prior.created_at if prior else now,
             updated_at=now,
             chunk_ids=ids,
             media=media_refs,
@@ -261,24 +270,187 @@ class Indexer:
             source_kind=source_kind,
             chunk_locations=locations,
         )
-        self.doc_store.upsert(doc)
-        if self.governance is not None:
+        self._commit_ingest(
+            prior=prior,
+            doc=doc,
+            ids=ids,
+            embeddings=embeddings,
+            texts=texts,
+            metas=metas,
+            scope=scope,
+            status=status,
+            content_hash=h,
+            exclude_from_learning=bool(user_meta.get("exclude_from_learning", False)),
+        )
+
+        # 相同内容强制写入到另一个 doc_id：新文档成功后再删旧副本。
+        if duplicate and force and duplicate.doc_id != doc_id:
+            self.delete_document(duplicate.doc_id, duplicate.collection)
+        return doc_id
+
+    def _commit_ingest(
+        self,
+        *,
+        prior: Document | None,
+        doc: Document,
+        ids: list[str],
+        embeddings: list[list[float]],
+        texts: list[str],
+        metas: list[dict],
+        scope: str,
+        status: str,
+        content_hash: str,
+        exclude_from_learning: bool,
+    ) -> None:
+        """写入向量和父文档。同 doc_id 先删旧向量再 add；失败则回滚。
+
+        Chroma 的 add 遇到已有 id 不会覆盖，chunk 变少时高序号也会残留，
+        所以替换必须按 doc_id 清掉旧向量。清掉之后如果 add / SQLite / 治理失败，
+        用快照把旧向量和旧父文档写回去。
+        """
+        collection = doc.collection
+        replacing = prior is not None
+        same_collection = replacing and prior.collection == collection
+        snapshot: list[StoredVector] = []
+        deleted_old = False
+        wrote_new_vectors = False
+        wrote_sqlite = False
+        wrote_meta = False
+        prior_meta = None
+        if replacing and self.governance is not None:
+            prior_meta = self.governance.get_meta(doc.doc_id)
+
+        try:
+            if same_collection:
+                snapshot = self._snapshot_vectors(collection, doc.doc_id)
+                if snapshot:
+                    # 同 doc_id 替换：先删光该文档的向量，再写入新 chunk。
+                    self.vector_store.delete(collection, where=eq("doc_id", doc.doc_id))
+                    deleted_old = True
+                self.vector_store.add(collection, ids, embeddings, texts, metas)
+                wrote_new_vectors = True
+            else:
+                self.vector_store.add(collection, ids, embeddings, texts, metas)
+                wrote_new_vectors = True
+
+            self.doc_store.upsert(doc)
+            wrote_sqlite = True
+
+            if self.governance is not None:
+                self.governance.upsert_meta(
+                    DocMeta(
+                        doc_id=doc.doc_id,
+                        content_hash=content_hash,
+                        scope=scope,
+                        status=status,
+                        exclude_from_learning=exclude_from_learning,
+                    )
+                )
+                wrote_meta = True
+                self.governance.emit_event(
+                    doc.doc_id,
+                    "ingest",
+                    {"scope": scope, "collection": collection},
+                )
+                # 原地替换不增加文档数；新 doc_id 再删旧文档才会一增一减。
+                if not replacing:
+                    self.governance.increment_manifest_docs(
+                        self.settings.embedding_manifest, 1
+                    )
+
+            if replacing and not same_collection:
+                self.vector_store.delete(
+                    prior.collection, where=eq("doc_id", doc.doc_id)
+                )
+        except Exception as exc:
+            try:
+                self._rollback_ingest(
+                    prior=prior,
+                    doc=doc,
+                    snapshot=snapshot,
+                    deleted_old=deleted_old,
+                    wrote_new_vectors=wrote_new_vectors,
+                    wrote_sqlite=wrote_sqlite,
+                    wrote_meta=wrote_meta,
+                    same_collection=same_collection,
+                    prior_meta=prior_meta,
+                )
+            except Exception as rollback_exc:
+                raise IngestError(
+                    f"入库失败且无法恢复旧文档: {rollback_exc}"
+                ) from exc
+            raise
+
+    def _snapshot_vectors(self, collection: str, doc_id: str) -> list[StoredVector]:
+        return self.vector_store.get(
+            collection,
+            where=eq("doc_id", doc_id),
+            include_embeddings=True,
+        )
+
+    def _restore_vectors(
+        self,
+        collection: str,
+        doc_id: str,
+        snapshot: list[StoredVector],
+    ) -> None:
+        """丢掉这次没写完的向量，再把快照加回去。"""
+        self.vector_store.delete(collection, where=eq("doc_id", doc_id))
+        if not snapshot:
+            return
+        ids: list[str] = []
+        embeddings: list[list[float]] = []
+        documents: list[str] = []
+        metadatas: list[dict] = []
+        for row in snapshot:
+            if not row.embedding:
+                raise IngestError("向量回滚失败：快照缺少嵌入")
+            ids.append(row.id)
+            embeddings.append([float(x) for x in row.embedding])
+            documents.append(row.document)
+            metadatas.append(_plain_meta(row.metadata))
+        self.vector_store.add(collection, ids, embeddings, documents, metadatas)
+
+    def _rollback_ingest(
+        self,
+        *,
+        prior: Document | None,
+        doc: Document,
+        snapshot: list[StoredVector],
+        deleted_old: bool,
+        wrote_new_vectors: bool,
+        wrote_sqlite: bool,
+        wrote_meta: bool,
+        same_collection: bool,
+        prior_meta: DocMeta | None,
+    ) -> None:
+        collection = doc.collection
+        if same_collection and (deleted_old or wrote_new_vectors):
+            self._restore_vectors(collection, doc.doc_id, snapshot)
+        elif wrote_new_vectors:
+            self.vector_store.delete(collection, where=eq("doc_id", doc.doc_id))
+
+        if wrote_sqlite:
+            if prior is not None:
+                self.doc_store.upsert(prior)
+            else:
+                self.doc_store.delete(doc.doc_id)
+
+        if self.governance is None or not wrote_meta:
+            return
+        if prior_meta is not None:
+            self.governance.upsert_meta(prior_meta)
+        elif prior is not None:
             self.governance.upsert_meta(
                 DocMeta(
-                    doc_id=doc_id,
-                    content_hash=h,
-                    scope=scope,
-                    status=status,
-                    exclude_from_learning=bool(user_meta.get("exclude_from_learning", False)),
+                    doc_id=prior.doc_id,
+                    content_hash=prior.content_hash,
+                    scope=prior.scope,
+                    status=prior.status,
                 )
             )
-            self.governance.emit_event(
-                doc_id, "ingest", {"scope": scope, "collection": collection}
-            )
-            self.governance.increment_manifest_docs(
-                self.settings.embedding_manifest, 1
-            )
-        return doc_id
+        else:
+            self.governance.mark_deleted(doc.doc_id)
 
     # ---- 管理 ----
     def delete_document(self, doc_id: str, collection: str | None = None) -> bool:
@@ -300,13 +472,17 @@ class Indexer:
         return True
 
     def update_document(self, doc_id: str, new_content: str, **kwargs) -> str | None:
-        """更新 = 删除旧文档 + 重新入库（内容变化 → 新 doc_id 返回）。"""
+        """用新内容替换文档。先入库，成功后再删除被换掉的旧 doc_id。
+
+        未显式重新绑定路径时，新正文是 inline，不继承旧的源文件路径；
+        内容变化会得到新 doc_id，此时才删除旧文档。同一路径原地替换时
+        doc_id 不变，由入库路径按该 id 换向量。清洗、嵌入或向量写入失败
+        时不删除，旧文档仍可读取、仍可检索。
+        """
         doc = self.doc_store.get(doc_id)
         if not doc:
             raise NotFoundError(f"文档不存在: {doc_id}")
-        self.delete_document(doc_id, doc.collection)
-        # 未显式重新绑定路径时，提交的新正文是 inline，不继承旧的源文件路径。
-        return self.ingest_text(
+        new_id = self.ingest_text(
             content=new_content,
             title=kwargs.get("title", doc.title),
             source_path=kwargs.get("source_path", ""),
@@ -315,6 +491,11 @@ class Indexer:
             metadata=kwargs.get("metadata", doc.metadata),
             scope=kwargs.get("scope", doc.scope),
         )
+        if not new_id or new_id == doc_id:
+            # 内容未变，或已按同一 doc_id 原地替换。不要再 delete。
+            return doc_id
+        self.delete_document(doc_id, doc.collection)
+        return new_id
 
     def list_documents(self, collection: str | None = None) -> list[Document]:
         return self.doc_store.list(collection)

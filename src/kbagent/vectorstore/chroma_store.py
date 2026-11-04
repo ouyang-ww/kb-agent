@@ -17,6 +17,17 @@ from .base import StoredVector, VectorHit, VectorStore, distance_to_score
 __all__ = ["ChromaStore", "StoredVector", "VectorHit", "VectorStore"]
 
 
+def _embedding_list(raw: Any) -> list[float] | None:
+    """把 Chroma 返回的 ndarray / 序列收成普通 float 列表。"""
+    if raw is None:
+        return None
+    try:
+        values = [float(x) for x in raw]
+    except TypeError:
+        return None
+    return values or None
+
+
 class ChromaStore:
     """ChromaDB embedded 持久化实现。"""
 
@@ -123,6 +134,8 @@ class ChromaStore:
         ids: list[str] | None = None,
         where: Where = None,
         limit: int | None = None,
+        *,
+        include_embeddings: bool = False,
     ) -> list[StoredVector]:
         kwargs: dict[str, Any] = {}
         if ids:
@@ -132,15 +145,22 @@ class ChromaStore:
             kwargs["where"] = chroma_where
         if limit is not None:
             kwargs["limit"] = limit
+        if include_embeddings:
+            # 默认 get 不带向量；只有替换回滚才需要把嵌入读回来。
+            kwargs["include"] = ["documents", "metadatas", "embeddings"]
         res = self._coll(collection).get(**kwargs)
         ids_l = res.get("ids") or []
         docs = res.get("documents") or []
         metas = res.get("metadatas") or []
+        raw_embs = res.get("embeddings") if include_embeddings else None
         return [
             StoredVector(
                 id=ids_l[i],
-                document=docs[i] if i < len(docs) else "",
+                document=docs[i] if i < len(docs) and docs[i] is not None else "",
                 metadata=(metas[i] or {}) if i < len(metas) else {},
+                embedding=_embedding_list(raw_embs[i])
+                if raw_embs is not None and i < len(raw_embs)
+                else None,
             )
             for i in range(len(ids_l))
         ]

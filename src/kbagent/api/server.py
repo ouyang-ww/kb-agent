@@ -231,7 +231,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
 
     @app.post("/v1/documents/{doc_id}/refresh", response_model=IngestResponse, dependencies=[Depends(auth_admin)])
     def refresh_document(doc_id: str, req: IngestTextRequest):
-        """更新文档内容（= 删除旧文档 + 重新入库，返回新 doc_id）。"""
+        """更新文档内容。新内容入库成功后再移除被替换的旧文档。"""
         try:
             new_id = kb.update_document(doc_id, req.content, title=req.title)
         except NotFoundError as exc:
