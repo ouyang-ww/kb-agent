@@ -1,4 +1,6 @@
-"""索引器：编排入库链路 loaders → cleaner → chunker → 嵌入 → Chroma(子) + SQLite(父)。
+"""索引器：编排入库链路 loaders → cleaner → chunker → 嵌入 → Chroma(子) + SQLite(父记录)。
+
+绑定源文件时 SQLite 不保存整篇正文。
 
 含内容哈希去重、update/delete 级联清理、统计与报告。
 """
@@ -15,12 +17,19 @@ from ..config import Settings
 from ..document_store.base import DocumentStore
 from ..errors import IngestError, NotFoundError
 from ..governance import DocMeta, GovernanceStore
-from ..models import Document, MediaRef
+from ..models import (
+    SOURCE_BOUND,
+    SOURCE_INLINE,
+    SOURCE_ORPHANED,
+    Document,
+    MediaRef,
+)
 from ..storage.filters import eq
 from ..vectorstore.base import VectorStore
 from .chunker import Chunker
 from .cleaner import Cleaner
 from .loaders import content_hash, doc_id_for, load_file, scan_path
+from .source_text import locate_chunks, summarize
 
 
 @dataclass
@@ -32,6 +41,18 @@ class IngestReport:
     @property
     def ok(self) -> bool:
         return not self.failed
+
+
+def _source_kind(source_path: str, requested: str | None) -> str:
+    """有仍存在的外部文件则为 bound；声称了路径但文件不在则为 orphaned_copy。"""
+    if requested == SOURCE_INLINE:
+        return SOURCE_INLINE
+    path = (source_path or "").strip()
+    if path and Path(path).is_file():
+        return SOURCE_BOUND
+    if path:
+        return SOURCE_ORPHANED
+    return SOURCE_INLINE
 
 
 def _scalarize(meta: dict) -> dict:
@@ -100,6 +121,11 @@ class Indexer:
         force: bool = False,
         scope: str | None = None,
     ) -> str | None:
+        """入库一段文本。
+
+        ``source_path`` 指向仍存在的文件时视为绑定原件：索引和扩写都读该文件，
+        不把整篇正文写入 SQLite。没有外部路径时标为 ``inline``，正文留在应用库。
+        """
         raw = {
             "title": title or (Path(source_path).stem if source_path else "untitled"),
             "source_path": source_path,
@@ -114,10 +140,20 @@ class Indexer:
     # ---- 核心 ----
     def _ingest_raw(self, raw: dict, force: bool) -> str | None:
         collection = raw.get("collection") or self.settings.default_collection
-        source_path = raw.get("source_path", "")
+        source_path = raw.get("source_path", "") or ""
         title = raw.get("title", "untitled")
         content: str = raw.get("content", "")
         user_meta = raw.get("metadata") or {}
+        # 绑定文件以磁盘为准，避免提交文本和回读窗口各写一份。
+        if (
+            source_path
+            and Path(source_path).is_file()
+            and raw.get("source_kind") != SOURCE_INLINE
+        ):
+            loaded = load_file(Path(source_path))
+            if loaded and (loaded[0].get("content") or "").strip():
+                content = loaded[0]["content"]
+                raw["doc_type"] = raw.get("doc_type") or loaded[0].get("doc_type", "text")
         scope = raw.get("scope") or user_meta.get("scope") or self.settings.default_scope
         status = "active"
         if not content.strip():
@@ -164,6 +200,16 @@ class Indexer:
         if not chunks:
             raise IngestError("切块后无内容，跳过")
 
+        source_kind = _source_kind(source_path, raw.get("source_kind"))
+        if source_kind == SOURCE_INLINE:
+            # inline 没有外部原件，不把临时路径或声称的路径当成绑定源
+            source_path = ""
+        locations = locate_chunks(cleaned, chunks)
+        for chunk, loc in zip(chunks, locations):
+            if loc.start >= 0:
+                chunk.metadata["char_start"] = loc.start
+                chunk.metadata["char_end"] = loc.end
+
         ids = [c.chunk_id for c in chunks]
         texts = [c.text for c in chunks]
         manifest_id = self.settings.embedding_manifest
@@ -194,10 +240,12 @@ class Indexer:
         self.vector_store.add(collection, ids, embeddings, texts, metas)
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # 绑定原件只留在文件系统。inline / orphaned_copy 才把正文写入应用库。
+        stored_body = "" if source_kind == SOURCE_BOUND else cleaned
         doc = Document(
             doc_id=doc_id,
             title=title,
-            full_text=cleaned,
+            full_text=stored_body,
             source_path=source_path,
             doc_type=raw.get("doc_type", "text"),
             content_hash=h,
@@ -209,6 +257,9 @@ class Indexer:
             media=media_refs,
             scope=scope,
             status=status,
+            summary=summarize(cleaned),
+            source_kind=source_kind,
+            chunk_locations=locations,
         )
         self.doc_store.upsert(doc)
         if self.governance is not None:
@@ -254,10 +305,11 @@ class Indexer:
         if not doc:
             raise NotFoundError(f"文档不存在: {doc_id}")
         self.delete_document(doc_id, doc.collection)
+        # 未显式重新绑定路径时，提交的新正文是 inline，不继承旧的源文件路径。
         return self.ingest_text(
             content=new_content,
             title=kwargs.get("title", doc.title),
-            source_path=kwargs.get("source_path", doc.source_path),
+            source_path=kwargs.get("source_path", ""),
             doc_type=kwargs.get("doc_type", doc.doc_type),
             collection=kwargs.get("collection", doc.collection),
             metadata=kwargs.get("metadata", doc.metadata),

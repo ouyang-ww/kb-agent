@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     # ---- 意图识别 / 查询改写 ----
     intent_enabled: bool = True
     query_rewrite_enabled: bool = True
+    # 父文档扩写窗口：限制从源文件读入的长度，不截断 SQLite 里的 inline 正文
     max_parent_chars: int = 4000
     parent_mode: str = "full"  # full | section
 

@@ -49,7 +49,7 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 | KB_RERANK_ENABLED | true | Cross-Encoder 重排 |
 | KB_RERANK_CANDIDATES / KB_TOP_K | 20 / 5 | 候选数 / 最终返回数 |
 | KB_INTENT_ENABLED / KB_QUERY_REWRITE_ENABLED | true / true | 意图识别 / 查询改写 |
-| KB_MAX_PARENT_CHARS | 4000 | 父文档扩写上限 |
+| KB_MAX_PARENT_CHARS | 4000 | 从源文件读入的父文档窗口上限 |
 | KB_LLM_BASE_URL / KB_LLM_MODEL / KB_LLM_API_KEY | deepseek-chat | LLM（任意 OpenAI 兼容） |
 | KB_MULTIMODAL_ENABLED | true | 图片提取 + 描述（视觉模型） |
 | KB_VISION_LLM_MODEL | 空 | 答案生成时看图（如 qwen-vl / glm-4v） |
@@ -75,11 +75,11 @@ kb governance backfill                     # 旧文档 docs_meta 回填
 ```
 写入：loaders → cleaner → chunker(子 chunk 挂 doc_id) → 嵌入 → Chroma（切块）
       绑定来源的正文留在源文件，扩写时按路径回读
-      v0.1.0 的库仍含 SQLite 父全文，迁移见 ADR 0002
+      旧库父全文：kb governance migrate-parents（见 ADR 0002）
 读取：意图识别 → query改写 → 检索top-N → 重排top-k → 父文档扩写 → 编号引用 → LLM → Answer
 ```
 
-- **子母切块**：向量库存切块（携带 `doc_id`）。绑定来源的整篇正文留在源文件，扩写时回读；v0.1.0 仍把父全文放在 SQLite，迁移见 [ADR 0002](docs/adr/0002-no-original-duplication.md)。
+- **子母切块**：向量库存切块（携带 `doc_id`）。绑定来源的整篇正文留在源文件，扩写时回读。旧库用 `kb governance migrate-parents` 迁出，见 [ADR 0002](docs/adr/0002-no-original-duplication.md)。
 - **意图识别**：LLM 单次调用返回 `{intent, rewritten_query}`（kb_question / smalltalk / management / out_of_scope），失败自动降级为规则关键词。
 - **重排**：bge-reranker Cross-Encoder，模型加载失败自动降级为相似度排序。
 - **多模态**：PDF/markdown 内图片 → 提取 → 视觉 LLM 描述（+可选 OCR）→ 图文单元与文本同库检索；配置 `KB_VISION_LLM_MODEL` 后答案生成可看图，否则用描述文本。
@@ -174,9 +174,9 @@ src/kbagent/
 
 按 [status §5](docs/status.md) 推进（L1 与治理 P0 已交付）：
 
-- [x] **L1 检索助手**：清洗、子母切块、重排、多模态、评估（v0.1.0）。父全文入库将按 ADR 0002 改掉
+- [x] **L1 检索助手**：清洗、子母切块、重排、多模态、评估（v0.1.0）
 - [x] **P0 治理骨架**：`docs_meta` / `doc_events` / scope 隔离 / embedding manifest
-- [ ] **原件不双写**：迁出父全文，扩写回读源文件
+- [x] **原件不双写**：绑定源不存整篇正文，扩写回读源文件。旧库用 `kb governance migrate-parents`
 - [ ] **P1 可信与治理**：可答性闸门、引用契约、级联 consumers、库外拒答评测、检索 fail-closed scope
 - [ ] **P2 严格模式**：声明校验、过期/冲突检测、近似去重
 - [ ] **学习切片**：硬编码题、作答、下次到期。不抽取概念。托盘 / 小窗可在此起步

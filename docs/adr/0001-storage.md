@@ -14,8 +14,8 @@
 - 单用户、本地优先、长期使用的个人知识助手
 - 目标层级：L1 检索 → L2 知识结构 → L3 学习闭环
 - 数据治理要求：scope 隔离、过期/冲突、重复合并、embedding 迁移
-- 当前实现：Chroma（子 chunk 向量）+ `documents.sqlite3`（v0.1.0 含父文档全文）
-- 目标：父全文迁出，见 [ADR 0002](./0002-no-original-duplication.md)。本 ADR 的引擎选型不变
+- 当前实现：Chroma（子 chunk 向量）+ `documents.sqlite3`（路径、哈希、摘要、切块定位；只有 `inline` / `orphaned_copy` 保留正文）
+- 父全文不双写见 [ADR 0002](./0002-no-original-duplication.md)。本 ADR 的引擎选型不变
 
 估算规模：
 

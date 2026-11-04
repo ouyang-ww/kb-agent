@@ -18,6 +18,8 @@ from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
 from .governance import DocMeta, GovernanceStore, is_visible
+from .governance.originals import migrate_document
+from .ingestion.chunker import Chunker
 from .ingestion.indexer import IngestReport, Indexer
 from .models import Answer, Document, RetrievalHit
 from .retrieval.parent_expander import ParentExpander
@@ -316,6 +318,26 @@ class KnowledgeBase:
                 "governance.backfill", actor=actor, detail={"created": created}
             )
         return created
+
+    def migrate_parent_bodies(self, actor: str = "local") -> dict[str, int]:
+        """迁出已入库父全文。源文件仍在则改为绑定回读；缺失则标为 orphaned_copy。"""
+        chunker = Chunker(self.settings.chunk_size, self.settings.chunk_overlap)
+        report = {"bound": 0, "inline": 0, "orphaned_copy": 0, "unchanged": 0}
+        with self._lock:
+            for doc in self._doc_store.list():
+                outcome = migrate_document(doc, chunker)
+                report[outcome] = report.get(outcome, 0) + 1
+                if outcome == "unchanged":
+                    continue
+                self._doc_store.upsert(doc)
+            changed = report["bound"] + report["inline"] + report["orphaned_copy"]
+            if changed:
+                self.governance.record_audit(
+                    "governance.migrate_parents",
+                    actor=actor,
+                    detail=dict(report),
+                )
+        return report
 
     # ================= 检索 =================
     def search(

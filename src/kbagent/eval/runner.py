@@ -1,4 +1,8 @@
-"""评估执行器：retrieval/full 模式 + 参数对比实验。"""
+"""评估执行器：retrieval/full 模式 + 参数对比实验。
+
+Recall / Accuracy / Faithfulness 仍是检索与回答的质量护栏。
+ADR 0002 将父文档扩写改为回读源文件，这是有意的存储变更，不单独记为回归失败。
+"""
 
 from __future__ import annotations
 

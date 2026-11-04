@@ -10,6 +10,16 @@ from ..storage.filters import Where
 from ..vectorstore.base import VectorStore
 
 
+def _meta_offset(meta: dict, key: str) -> int | None:
+    if key not in meta or meta[key] is None:
+        return None
+    try:
+        value = int(meta[key])
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 class Retriever:
     def __init__(
         self,
@@ -58,6 +68,8 @@ class Retriever:
                     source_path=meta.get("source_path", ""),
                     media=media,
                     collection=collection,
+                    char_start=_meta_offset(meta, "char_start"),
+                    char_end=_meta_offset(meta, "char_end"),
                 )
             )
         return hits

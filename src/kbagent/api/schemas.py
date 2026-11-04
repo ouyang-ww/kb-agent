@@ -74,6 +74,8 @@ class DocumentOut(BaseModel):
     media: list[MediaOut] = []
     scope: str = "default"
     status: str = "active"
+    source_kind: str = "inline"
+    summary: str = ""
     full_text: str | None = None
 
 
@@ -81,6 +83,7 @@ class StatsOut(BaseModel):
     documents: int
     chunks: int
     by_collection: dict[str, int] = {}
+    by_source_kind: dict[str, int] = {}
     collections: list[str] = []
     chunks_by_collection: dict[str, int] = {}
 

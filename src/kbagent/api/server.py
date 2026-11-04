@@ -12,8 +12,9 @@ from fastapi.responses import JSONResponse
 
 from ..config import Settings
 from ..errors import IngestError, KBError, NotFoundError
+from ..ingestion.loaders import load_file
 from ..kb import KnowledgeBase
-from ..models import MediaRef
+from ..models import SOURCE_BOUND, MediaRef
 from .schemas import (
     AskResponse,
     DocumentOut,
@@ -53,6 +54,8 @@ def _hit_out(h) -> HitOut:
 
 
 def _doc_out(doc, include_text: bool = False) -> DocumentOut:
+    # 绑定原件的正文不在库里，响应也不附带整篇正文。
+    include_body = include_text and doc.source_kind != SOURCE_BOUND
     return DocumentOut(
         doc_id=doc.doc_id,
         title=doc.title,
@@ -66,7 +69,9 @@ def _doc_out(doc, include_text: bool = False) -> DocumentOut:
         media=[_media_out(m) for m in doc.media if m is not None],
         scope=doc.scope,
         status=doc.status,
-        full_text=doc.full_text if include_text else None,
+        source_kind=doc.source_kind,
+        summary=doc.summary,
+        full_text=doc.full_text if include_body else None,
     )
 
 
@@ -161,15 +166,36 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         suffix = Path(file.filename or "").suffix or ".txt"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(await file.read())
-            tmp_path = tmp.name
+            tmp_path = Path(tmp.name)
         try:
-            report = kb.ingest(tmp_path, collection=collection, scope=scope)
+            # 上传文件没有可长期绑定的外部路径，临时文件删掉后按 inline 保存正文。
+            try:
+                raws = load_file(tmp_path)
+            except IngestError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if not raws:
+                raise HTTPException(status_code=422, detail="没有可入库的内容")
+            raw = raws[0]
+            meta = dict(raw.get("metadata") or {})
+            if file.filename:
+                meta["upload_name"] = file.filename
+            title = Path(file.filename).stem if file.filename else raw.get("title")
+            try:
+                doc_id = kb.ingest_text(
+                    raw.get("content") or "",
+                    title=title,
+                    source_path="",
+                    doc_type=raw.get("doc_type") or "text",
+                    collection=collection,
+                    metadata=meta,
+                    scope=scope,
+                )
+            except IngestError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
-            Path(tmp_path).unlink(missing_ok=True)
-        if report.added:
-            return IngestResponse(doc_id=report.added[0], status="added", path=file.filename)
-        if report.failed:
-            raise HTTPException(status_code=422, detail=str(report.failed[0]["error"]))
+            tmp_path.unlink(missing_ok=True)
+        if doc_id:
+            return IngestResponse(doc_id=doc_id, status="added", path=file.filename)
         return IngestResponse(doc_id=None, status="skipped", path=file.filename)
 
     # ---- 文档管理 ----
@@ -246,6 +272,11 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
     @app.post("/v1/governance/backfill", dependencies=[Depends(auth_admin)])
     def backfill_governance():
         return {"created": kb.backfill_governance(actor="api")}
+
+    @app.post("/v1/governance/migrate-parents", dependencies=[Depends(auth_admin)])
+    def migrate_parents():
+        """迁出已入库父全文（admin）。源文件缺失的记录标为 orphaned_copy。"""
+        return kb.migrate_parent_bodies(actor="api")
 
     @app.get("/v1/health")
     def health():

@@ -70,6 +70,7 @@ kb-agent/
 │       │   └── pipeline.py
 │       ├── governance/
 │       │   ├── __init__.py
+│       │   ├── originals.py
 │       │   ├── scope.py
 │       │   └── store.py
 │       ├── ingestion/
@@ -77,13 +78,15 @@ kb-agent/
 │       │   ├── chunker.py
 │       │   ├── cleaner.py
 │       │   ├── indexer.py
-│       │   └── loaders.py
+│       │   ├── loaders.py
+│       │   └── source_text.py
 │       ├── retrieval/
 │       │   ├── __init__.py
 │       │   ├── parent_expander.py
 │       │   ├── query_processor.py
 │       │   ├── reranker.py
-│       │   └── retriever.py
+│       │   ├── retriever.py
+│       │   └── source_window.py
 │       ├── storage/
 │       │   ├── __init__.py
 │       │   ├── factory.py
@@ -121,6 +124,7 @@ kb-agent/
 │   ├── test_governance.py
 │   ├── test_ingest.py
 │   ├── test_metrics.py
+│   ├── test_original_storage.py
 │   ├── test_pipeline.py
 │   ├── test_query_processor.py
 │   ├── test_retriever.py
@@ -145,12 +149,12 @@ kb-agent/
 | `src/kbagent/governance/` | 治理：docs_meta / doc_events / consumer_cursor / scope / answer_log / audit_log / manifest |
 | `src/kbagent/flags.py` | 运行时开关：runtime_flags + 热切换 |
 | `src/kbagent/storage/` | 存储抽象：后端中立 Filter、适配器工厂 |
-| `src/kbagent/vectorstore/` + `document_store/` | VectorStore / DocumentStore 协议；Chroma(子chunk) + SQLite(父文档全文) |
+| `src/kbagent/vectorstore/` + `document_store/` | VectorStore / DocumentStore 协议；Chroma(切块) + SQLite(路径、哈希、摘要、切块定位；inline 正文) |
 | `src/kbagent/vision/` | 多模态：图片提取 → 描述 → OCR → 图文单元 |
 | `src/kbagent/eval/` | 评估：评测集 / 指标(recall@k, accuracy…) / LLM-as-judge / 对比实验 |
 | `src/kbagent/api/` + `ui/` | FastAPI REST + Gradio 聊天界面 |
 | `src/kbagent/cli.py` | CLI：ingest / search / ask / list / delete / stats / serve / chat / eval / eval-build |
-| `tests/` | 110 个测试，覆盖 L1 全部模块 + 存储抽象 + 运行时开关 + 治理/日志/Key 分权 |
+| `tests/` | 122 个测试，覆盖 L1 全部模块 + 存储抽象 + 运行时开关 + 治理/日志/Key 分权 + 原件不双写 |
 | `examples/` | 组件集成示例 + 示例知识库文档 |
 | `eval/` | 基线评测集与评估报告 |
 | `docs/` | 规划文档：愿景、架构设计、当前进度、L1→L3 拆解、知识治理、知识图谱学习笔记；`adr/` 架构决策记录；`archive/` 历史计划 |

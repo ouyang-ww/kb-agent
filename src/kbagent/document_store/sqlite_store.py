@@ -1,6 +1,7 @@
 """文档库：SQLite 适配器（实现 DocumentStore Protocol）。
 
-存父文档全文（子母文档中的「母」），支持哈希去重查询、列表/过滤与统计。
+绑定源文件的文档不保存整篇正文，只保存路径、哈希、摘要与切块定位。
+无外部原件的 inline 正文，以及源文件已丢失的 orphaned_copy，仍留在本库。
 SQL 全部收敛在本模块，外部只依赖 Document 模型与中立 Filter。
 """
 
@@ -11,7 +12,12 @@ import sqlite3
 import threading
 from typing import Any
 
-from ..models import Document, MediaRef
+from ..models import (
+    SOURCE_BOUND,
+    ChunkLocation,
+    Document,
+    MediaRef,
+)
 from ..storage.filters import Where, compile_sql
 
 _SCHEMA = """
@@ -29,7 +35,10 @@ CREATE TABLE IF NOT EXISTS documents (
   chunk_ids TEXT DEFAULT '[]',
   media TEXT DEFAULT '[]',
   scope TEXT DEFAULT 'default',
-  status TEXT DEFAULT 'active'
+  status TEXT DEFAULT 'active',
+  summary TEXT DEFAULT '',
+  source_kind TEXT DEFAULT 'inline',
+  chunk_locations TEXT DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_docs_hash ON documents(content_hash);
 CREATE INDEX IF NOT EXISTS idx_docs_collection ON documents(collection);
@@ -48,12 +57,30 @@ _FILTER_FIELDS = frozenset(
         "updated_at",
         "scope",
         "status",
+        "source_kind",
     }
 )
 
 
+def _load_locations(raw: str | None) -> list[ChunkLocation]:
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [ChunkLocation.from_dict(item) for item in data if isinstance(item, dict)]
+
+
+def _dump_locations(locations: list[ChunkLocation]) -> str:
+    return json.dumps([loc.to_dict() for loc in locations], ensure_ascii=False)
+
+
 class SQLiteDocumentStore:
-    """父文档全文库：按 doc_id 存取、哈希去重查询、列表与统计。"""
+    """父文档库：按 doc_id 存取、哈希去重查询、列表与统计。
+
+    ``source_kind=bound`` 时不落整篇正文（写入会被清空）。
+    """
 
     def __init__(self, path: str | Any) -> None:
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -80,18 +107,34 @@ class SQLiteDocumentStore:
                 self._conn.execute(
                     "ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'active'"
                 )
+            # 旧库默认 legacy：父全文还在，等 migrate-parents 分类
+            if "summary" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN summary TEXT DEFAULT ''"
+                )
+            if "source_kind" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN source_kind TEXT DEFAULT 'legacy'"
+                )
+            if "chunk_locations" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN chunk_locations TEXT DEFAULT '[]'"
+                )
             self._conn.commit()
 
     # ---- 写 ----
     def upsert(self, doc: Document) -> None:
+        # 绑定原件不把整篇正文写入应用库
+        full_text = "" if doc.source_kind == SOURCE_BOUND else doc.full_text
         with self._lock:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO documents(
                   doc_id, title, source_path, doc_type, content_hash,
                   metadata, collection, created_at, updated_at, full_text,
-                  chunk_ids, media, scope, status
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  chunk_ids, media, scope, status, summary, source_kind,
+                  chunk_locations
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     doc.doc_id,
@@ -103,13 +146,16 @@ class SQLiteDocumentStore:
                     doc.collection,
                     doc.created_at,
                     doc.updated_at,
-                    doc.full_text,
+                    full_text,
                     json.dumps(doc.chunk_ids),
                     json.dumps(
                         [m.to_metadata() for m in doc.media], ensure_ascii=False
                     ),
                     doc.scope,
                     doc.status,
+                    doc.summary,
+                    doc.source_kind,
+                    _dump_locations(doc.chunk_locations),
                 ),
             )
             self._conn.commit()
@@ -134,14 +180,16 @@ class SQLiteDocumentStore:
     # ---- 读 ----
     @staticmethod
     def _row_to_doc(row: sqlite3.Row) -> Document:
+        keys = row.keys()
         media = [
             MediaRef.from_metadata(m) or MediaRef()
             for m in json.loads(row["media"] or "[]")
         ]
+        kind = row["source_kind"] if "source_kind" in keys else "legacy"
         return Document(
             doc_id=row["doc_id"],
             title=row["title"],
-            full_text=row["full_text"],
+            full_text=row["full_text"] or "",
             source_path=row["source_path"],
             doc_type=row["doc_type"],
             content_hash=row["content_hash"],
@@ -151,8 +199,13 @@ class SQLiteDocumentStore:
             updated_at=row["updated_at"],
             chunk_ids=json.loads(row["chunk_ids"] or "[]"),
             media=media,
-            scope=(row["scope"] or "default") if "scope" in row.keys() else "default",
-            status=(row["status"] or "active") if "status" in row.keys() else "active",
+            scope=(row["scope"] or "default") if "scope" in keys else "default",
+            status=(row["status"] or "active") if "status" in keys else "active",
+            summary=(row["summary"] or "") if "summary" in keys else "",
+            source_kind=kind or "legacy",
+            chunk_locations=_load_locations(
+                row["chunk_locations"] if "chunk_locations" in keys else "[]"
+            ),
         )
 
     def get(self, doc_id: str) -> Document | None:
@@ -205,10 +258,17 @@ class SQLiteDocumentStore:
             total_chunks = self._conn.execute(
                 "SELECT COALESCE(SUM(json_array_length(chunk_ids)), 0) FROM documents"
             ).fetchone()[0]
+            by_source_kind = {
+                (r["source_kind"] or "legacy"): r["c"]
+                for r in self._conn.execute(
+                    "SELECT source_kind, COUNT(*) AS c FROM documents GROUP BY source_kind"
+                ).fetchall()
+            }
         return {
             "documents": total,
             "chunks": total_chunks,
             "by_collection": by_collection,
+            "by_source_kind": by_source_kind,
         }
 
     def close(self) -> None:
