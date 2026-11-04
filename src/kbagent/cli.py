@@ -242,6 +242,14 @@ def governance_backfill():
     typer.echo(f"已补充 {created} 条 docs_meta")
 
 
+@governance_app.command("migrate-parents")
+def governance_migrate_parents():
+    """迁出已入库父全文。哈希一致才改为回读；不一致标为 diverged。"""
+    kb = _kb()
+    report = kb.migrate_parent_bodies()
+    typer.echo(json.dumps(report, ensure_ascii=False))
+
+
 @app.command()
 def stats():
     """知识库统计。"""
@@ -403,7 +411,7 @@ def eval_build(
         prompt = (
             "基于下面这篇文档，生成 1 个知识问答评测对。\n"
             "要求：问题有明确答案、可检索验证；JSON 输出。\n"
-            f"文档标题：{d.title}\n文档内容（截断）：\n{d.full_text[:1500]}\n"
+            f"文档标题：{d.title}\n文档内容（截断）：\n{_parent_excerpt(d, 1500)}\n"
             "只输出 JSON：{\"query\": \"问题\", \"expected_answer\": \"参考答案\", \"category\": \"事实问答|概念解释|操作步骤|对比分析|综合\"}"
         )
         try:
@@ -421,6 +429,26 @@ def eval_build(
     save_dataset(items, output)
     typer.echo(f"已生成 {len(items)} 条评测对 → {output}")
     typer.echo("⚠️ 请人工抽检/修正后使用；relevant_doc_ids 已自动标注来源文档。")
+
+
+def _parent_excerpt(doc, limit: int) -> str:
+    """评测抽样用的正文窗口。绑定文档只在哈希一致时回读源文件。"""
+    from .errors import IngestError
+    from .ingestion.source_text import read_verified_source
+    from .models import SOURCE_BOUND
+    from .retrieval.source_window import slice_parent_window
+
+    if doc.source_kind == SOURCE_BOUND and doc.source_path:
+        try:
+            cleaned = read_verified_source(doc.source_path, doc.content_hash or "")
+        except (OSError, IngestError):
+            cleaned = None
+        if cleaned is None:
+            return doc.summary
+        return slice_parent_window(cleaned, start=0, end=limit, max_chars=limit)
+    if doc.full_text:
+        return doc.full_text[:limit]
+    return doc.summary
 
 
 def main() -> None:

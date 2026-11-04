@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "fastapi>=0.111",
+    "python-multipart>=0.0.9",
     "uvicorn>=0.30",
     "gradio>=4.44",
     "pypdf>=4.2",

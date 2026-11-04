@@ -43,9 +43,60 @@ class MediaRef:
         )
 
 
+# 原文放在哪。见 ADR 0002。
+SOURCE_BOUND = "bound"  # Vault / 文件夹；正文只在源文件
+SOURCE_INLINE = "inline"  # 无外部原件，正文留在应用库
+SOURCE_ORPHANED = "orphaned_copy"  # 源文件已不在，库内副本保留待用户处理
+SOURCE_DIVERGED = "diverged"  # 源文件还在，但与已入库哈希不一致；保留正文，待重新入库
+SOURCE_LEGACY = "legacy"  # 迁移前的旧行，仍可能带父全文
+SOURCE_KINDS = frozenset(
+    {
+        SOURCE_BOUND,
+        SOURCE_INLINE,
+        SOURCE_ORPHANED,
+        SOURCE_DIVERGED,
+        SOURCE_LEGACY,
+    }
+)
+
+
+@dataclass
+class ChunkLocation:
+    """切块在清洗后源文本中的字符区间（含 start，不含 end）。"""
+
+    chunk_id: str
+    start: int
+    end: int
+    section: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chunk_id": self.chunk_id,
+            "start": self.start,
+            "end": self.end,
+            "section": self.section,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ChunkLocation:
+        return cls(
+            chunk_id=str(data.get("chunk_id", "")),
+            start=int(data.get("start", -1)),
+            end=int(data.get("end", -1)),
+            section=str(data.get("section", "")),
+        )
+
+
 @dataclass
 class Document:
-    """父文档：存 SQLite 文档库（含清洗后全文）。"""
+    """父文档记录。
+
+    ``bound``：不保存整篇正文，扩写时按路径回读源文件（须哈希一致）。
+    ``inline``：无外部原件，正文留在应用库。
+    ``orphaned_copy``：源文件已丢失，库内副本保留到用户处理。
+    ``diverged``：源文件还在，但与已入库哈希不一致。不用 ``orphaned_copy``，
+    因为文件并没有丢；保留正文，等重新入库后再删。
+    """
 
     doc_id: str
     title: str
@@ -61,6 +112,9 @@ class Document:
     media: list[MediaRef] = field(default_factory=list)
     scope: str = "default"
     status: str = "active"
+    summary: str = ""
+    source_kind: str = SOURCE_INLINE
+    chunk_locations: list[ChunkLocation] = field(default_factory=list)
 
     @property
     def is_hidden(self) -> bool:
@@ -103,6 +157,8 @@ class RetrievalHit:
     source_path: str = ""
     media: MediaRef | None = None
     collection: str = ""
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 @dataclass

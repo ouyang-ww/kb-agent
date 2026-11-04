@@ -18,6 +18,7 @@ from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
 from .governance import DocMeta, GovernanceStore, is_visible
+from .governance.originals import RE_INGEST_HINT, migrate_document
 from .ingestion.indexer import IngestReport, Indexer
 from .models import Answer, Document, RetrievalHit
 from .retrieval.parent_expander import ParentExpander
@@ -25,7 +26,7 @@ from .retrieval.query_processor import QueryProcessor
 from .retrieval.reranker import Reranker
 from .retrieval.retriever import Retriever
 from .storage.factory import make_document_store, make_vector_store
-from .storage.filters import Where
+from .storage.filters import Where, eq
 from .vectorstore.base import VectorStore
 from .vision.indexer import VisionIndexer
 
@@ -316,6 +317,50 @@ class KnowledgeBase:
                 "governance.backfill", actor=actor, detail={"created": created}
             )
         return created
+
+    def _stored_chunks(self, doc: Document) -> list:
+        """向量库里这份文档已有的切块。迁移只用它们对齐定位。"""
+        collection = doc.collection or self.settings.default_collection
+        try:
+            return self._vector_store.get(collection, where=eq("doc_id", doc.doc_id))
+        except Exception:
+            return []
+
+    def migrate_parent_bodies(self, actor: str = "local") -> dict[str, Any]:
+        """迁出已入库父全文。
+
+        哈希与源文件一致才标 ``bound`` 并删除正文。不一致则标 ``diverged`` 并保留正文。
+        源文件不在则标 ``orphaned_copy``。``diverged`` 时结果里带重新入库提示。
+        """
+        report: dict[str, Any] = {
+            "bound": 0,
+            "inline": 0,
+            "orphaned_copy": 0,
+            "diverged": 0,
+            "unchanged": 0,
+        }
+        with self._lock:
+            for doc in self._doc_store.list():
+                outcome = migrate_document(doc, self._stored_chunks(doc))
+                report[outcome] = int(report.get(outcome, 0)) + 1
+                if outcome == "unchanged":
+                    continue
+                self._doc_store.upsert(doc)
+            if report["diverged"]:
+                report["re_ingest_hint"] = RE_INGEST_HINT.format(n=report["diverged"])
+            changed = (
+                report["bound"]
+                + report["inline"]
+                + report["orphaned_copy"]
+                + report["diverged"]
+            )
+            if changed:
+                self.governance.record_audit(
+                    "governance.migrate_parents",
+                    actor=actor,
+                    detail=dict(report),
+                )
+        return report
 
     # ================= 检索 =================
     def search(

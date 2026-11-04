@@ -132,7 +132,7 @@ flowchart TB
 | 存储 | 内容 | 可重建 |
 | --- | --- | --- |
 | 源文件 | Markdown / PDF / 网页 | ✅ 唯一事实来源 |
-| `documents.sqlite3` | 路径、哈希、摘要、切块定位、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`embedding_manifest`、`runtime_pointer`、`runtime_flags`。v0.1.0 仍含父全文，待按 ADR 0002 迁出。无外部原件的 `inline` 正文留在库内 | 索引可从源文件重建 |
+| `documents.sqlite3` | 路径、哈希、摘要、切块定位、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`embedding_manifest`、`runtime_pointer`、`runtime_flags`。绑定原件不存整篇正文。无外部原件的 `inline` 正文留在库内；源文件已丢失的旧副本标为 `orphaned_copy` | 索引可从源文件重建 |
 | `study.sqlite3` | `concepts`、`concept_edges`、`mentions`、`items`、`attempts`、`learner_state`、`reviews`、`outline_nodes` | 除 `attempts` / `learner_state` 外可 |
 | Chroma | 子 chunk 向量 + 元数据（`doc_id`、`scope`、`status`、`valid_until`、`manifest_id`） | ✅ |
 | `media/` | 图片等媒体文件 | ✅（从源文件重建） |
@@ -197,8 +197,8 @@ sequenceDiagram
     R-->>A: candidate hits
     A->>RR: rerank(top-k)
     RR-->>A: ranked hits
-    A->>D: expand by doc_id
-    D-->>A: parent text / window
+    A->>D: expand by doc_id（bound 回读源文件）
+    D-->>A: parent window（不超过 KB_MAX_PARENT_CHARS）
     A->>L: prompt(sources + question)
     L-->>A: answer + citations
     A-->>U: Answer(text, sources, meta)
@@ -207,6 +207,7 @@ sequenceDiagram
 
 **关键约束**：
 
+- 绑定原件的父文档扩写回读源文件，不从 SQLite 取整篇正文（ADR 0002）
 - 检索必须带 scope 条件，隐藏文档在存储层过滤
 - 答案只依据编号来源，每个事实句带引用
 - 无相关内容时拒答，不臆造

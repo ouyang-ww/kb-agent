@@ -13,7 +13,7 @@ from ..storage.filters import Where
 
 @runtime_checkable
 class DocumentStore(Protocol):
-    """父文档全文库最小契约。"""
+    """父文档库最小契约。绑定原件不要求保存整篇正文。"""
 
     def upsert(self, doc: Document) -> None: ...
 

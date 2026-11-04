@@ -17,10 +17,14 @@ hits = kb.search("什么是向量检索", top_k=3)
 for h in hits:
     print(f"[{h.score:.3f}] {h.title} | doc_id={h.doc_id} | {h.text[:60]}...")
 
-# 3) 按 doc_id 回查原文档（子母文档）
+# 3) 按 doc_id 回查文档记录（绑定原件的正文在源文件，不在库里）
 if hits:
     doc = kb.get_document(hits[0].doc_id)
-    print("\n原文档全文:\n", doc.full_text[:200])
+    if doc.source_kind == "inline":
+        print("\ninline 正文:\n", doc.full_text[:200])
+    else:
+        print(f"\n{doc.source_kind} 摘要:\n", doc.summary)
+        print("源路径:", doc.source_path)
 
 # 4) RAG 问答（需要配置 LLM key）
 ans = kb.ask("RAG 的优缺点是什么？")

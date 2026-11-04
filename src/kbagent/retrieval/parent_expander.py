@@ -1,14 +1,27 @@
-"""父文档扩写：子 chunk 命中 → 按 doc_id 聚合取父文档全文（子母文档回查）。
+"""父文档扩写：子 chunk 命中后取父文档上下文。
 
-超长父文档按命中片段取窗口；同一 doc 只扩写一次。
+绑定 Vault / 文件夹的文档按路径回读源文件，再按切块定位截取。
+不从 SQLite 读取这类文档的整篇正文。``max_parent_chars``（``KB_MAX_PARENT_CHARS``）
+只限制返回窗口；回读本身会重新清洗整篇源文件。
+
+回读前核对 ``content_hash``。哈希为空或不一致时，不把磁盘上的新文本送进提示词，
+退回本次命中的切块文本（与文件缺失时相同）。``diverged`` / ``orphaned_copy`` /
+``inline`` 仍使用库内正文，因为那份正文才是向量对应的内容。
+
+回读源文件是 ADR 0002 的有意变更。Recall / Accuracy / Faithfulness 继续衡量
+检索与回答，不把「父全文不再来自 SQLite」记成 L1 回归失败。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..models import MediaRef, RetrievalHit
+from ..errors import IngestError
+from ..ingestion.source_text import read_verified_source
+from ..models import SOURCE_BOUND, ChunkLocation, MediaRef, RetrievalHit
+from .source_window import slice_parent_window
 
 if TYPE_CHECKING:
     from ..document_store.base import DocumentStore
@@ -47,12 +60,7 @@ class ParentExpander:
                 continue
             seen.add(hit.doc_id)
             doc = self.doc_store.get(hit.doc_id)
-            if doc and len(doc.full_text) <= self.max_parent_chars:
-                text = doc.full_text
-            elif doc:
-                text = self._window(doc.full_text, hit.text)
-            else:
-                text = hit.text
+            text = self._parent_text(doc, hit)
             items.append(
                 ContextItem(
                     doc_id=hit.doc_id,
@@ -67,12 +75,55 @@ class ParentExpander:
             )
         return items
 
-    def _window(self, full_text: str, chunk_text: str) -> str:
-        """在父文档中定位命中片段，取 max_parent_chars 窗口。"""
-        probe = chunk_text[:50].strip()
-        idx = full_text.find(probe)
-        if idx == -1:
-            return full_text[: self.max_parent_chars]
-        half = self.max_parent_chars // 2
-        start = max(0, idx - half)
-        return full_text[start : start + self.max_parent_chars]
+    def _parent_text(self, doc, hit: RetrievalHit) -> str:
+        if doc is None:
+            return hit.text
+        start, end = self._span(doc, hit)
+        if doc.source_kind == SOURCE_BOUND:
+            return self._from_source(doc, hit, start, end)
+        if not doc.full_text:
+            return hit.text
+        return slice_parent_window(
+            doc.full_text,
+            start=start,
+            end=end,
+            max_chars=self.max_parent_chars,
+            probe=hit.text,
+        )
+
+    def _from_source(self, doc, hit: RetrievalHit, start: int | None, end: int | None) -> str:
+        path = doc.source_path or ""
+        if not path or not Path(path).is_file():
+            return hit.text
+        try:
+            cleaned = read_verified_source(path, doc.content_hash or "")
+        except (OSError, IngestError):
+            return hit.text
+        if cleaned is None:
+            return hit.text
+        return slice_parent_window(
+            cleaned,
+            start=start,
+            end=end,
+            max_chars=self.max_parent_chars,
+            probe=hit.text,
+        )
+
+    @staticmethod
+    def _span(doc, hit: RetrievalHit) -> tuple[int | None, int | None]:
+        if (
+            hit.char_start is not None
+            and hit.char_end is not None
+            and hit.char_start >= 0
+            and hit.char_end > hit.char_start
+        ):
+            return hit.char_start, hit.char_end
+        locations: list[ChunkLocation] = getattr(doc, "chunk_locations", []) or []
+        for loc in locations:
+            if (
+                loc.chunk_id == hit.chunk_id
+                and loc.start >= 0
+                and loc.end > loc.start
+            ):
+                return loc.start, loc.end
+        return None, None
