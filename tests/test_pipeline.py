@@ -1,8 +1,10 @@
 """RAG pipeline 测试：全流程、意图路由、无结果不臆造、来源编号。"""
 
+import inspect
 import threading
 
 from kbagent.config import Settings
+from kbagent.generation.pipeline import RAGPipeline
 from kbagent.kb import KnowledgeBase
 from kbagent.models import QueryPlan
 
@@ -68,7 +70,14 @@ def test_ask_sources_carried(settings):
 
 
 def test_search_and_ask_do_not_clobber_shared_flags(kb):
-    """search/ask 的本次开关不能写进共享 Settings，并发时也不能留脏值。"""
+    """search/ask 的本次开关不能写进共享 Settings，并发时检索词也不能串。"""
+    for src in (
+        inspect.getsource(KnowledgeBase.search),
+        inspect.getsource(RAGPipeline.ask),
+    ):
+        assert ".query_rewrite_enabled =" not in src
+        assert ".intent_enabled =" not in src
+
     kb.settings.query_rewrite_enabled = False
     kb.settings.intent_enabled = True
     search_entered = threading.Event()
@@ -76,22 +85,40 @@ def test_search_and_ask_do_not_clobber_shared_flags(kb):
     search_release = threading.Event()
     ask_release = threading.Event()
     seen: dict[str, tuple] = {}
+    retrieved: list[str] = []
+    errors: list[BaseException] = []
 
     def fake_process(query, intent_enabled=None, rewrite_enabled=None):
         seen[query] = (rewrite_enabled, intent_enabled)
+        rewritten = f"REWRITE:{query}" if rewrite_enabled else query
         if query == "SEARCH":
             search_entered.set()
             assert search_release.wait(timeout=3)
         elif query == "ASK":
             ask_entered.set()
             assert ask_release.wait(timeout=3)
-        return QueryPlan("kb_question", query, query)
+        return QueryPlan("kb_question", rewritten, query)
+
+    def tracking_search(query, *args, **kwargs):
+        retrieved.append(query)
+        return []
+
+    def run_search() -> None:
+        try:
+            kb.search("SEARCH", rewrite=True)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_ask() -> None:
+        try:
+            kb.ask("ASK", rewrite=False, intent=False)
+        except BaseException as exc:
+            errors.append(exc)
 
     kb._query_processor.process = fake_process
-    t_search = threading.Thread(target=lambda: kb.search("SEARCH", rewrite=True))
-    t_ask = threading.Thread(
-        target=lambda: kb.ask("ASK", rewrite=False, intent=False)
-    )
+    kb._retriever.search = tracking_search
+    t_search = threading.Thread(target=run_search)
+    t_ask = threading.Thread(target=run_ask)
     ask_started = False
     try:
         t_search.start()
@@ -132,6 +159,8 @@ def test_search_and_ask_do_not_clobber_shared_flags(kb):
     )
     assert seen["SEARCH"] == (True, True)
     assert seen["ASK"] == (False, False)
+    assert errors == []
+    assert retrieved == ["REWRITE:SEARCH", "ASK"]
 
 
 def test_ask_rewrite_used_for_retrieval(settings):
