@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import logging
 import secrets
 import tempfile
 from pathlib import Path
@@ -12,7 +14,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from ..config import Settings
-from ..errors import IngestError, KBError, NotFoundError
+from ..errors import ConfigError, IngestError, KBError, NotFoundError
 from ..ingestion.loaders import load_file
 from ..kb import KnowledgeBase
 from ..models import SOURCE_BOUND, MediaRef
@@ -29,6 +31,63 @@ from .schemas import (
     SourceOut,
     StatsOut,
 )
+
+logger = logging.getLogger(__name__)
+
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost."})
+
+OPEN_AUTH_WARNING = (
+    "警告: 未配置 API Key，鉴权已关闭，仅适用于本机 {host} 开发。"
+    "入库、删除、隐藏和开关接口对本机开放。"
+    "不要把服务暴露到局域网或公网；对外请设置 KB_API_KEY，"
+    "或 KB_API_READ_KEY 与 KB_API_ADMIN_KEY。"
+)
+
+
+def is_loopback_host(host: str) -> bool:
+    """监听地址是否只对本机回环开放。"""
+    name = (host or "").strip().lower()
+    if name in _LOOPBACK_NAMES:
+        return True
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    name = name.split("%", 1)[0].strip()
+    if not name:
+        return False
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def configured_api_keys(settings: Settings) -> tuple[str, str]:
+    """(read_key, admin_key)。旧 api_key 视为 admin；read 缺省时沿用 admin。"""
+    admin = settings.api_admin_key or settings.api_key
+    read = settings.api_read_key or admin
+    return read, admin
+
+
+def api_auth_disabled(settings: Settings) -> bool:
+    read_key, admin_key = configured_api_keys(settings)
+    return not read_key and not admin_key
+
+
+def ensure_api_bind_allowed(settings: Settings, host: str) -> None:
+    """无 Key 时拒绝非回环监听。KB_API_REQUIRE_AUTH 时回环也拒绝。"""
+    if not api_auth_disabled(settings):
+        return
+    if settings.api_require_auth:
+        raise ConfigError(
+            "已设置 KB_API_REQUIRE_AUTH，但没有配置 API Key，拒绝启动。"
+            "请设置 KB_API_KEY，或 KB_API_READ_KEY 与 KB_API_ADMIN_KEY。"
+        )
+    if not is_loopback_host(host):
+        raise ConfigError(
+            f"拒绝在 {host} 上无 API Key 启动：该地址不是本机回环，"
+            "入库、删除和开关接口会对网络开放。"
+            "请设置 KB_API_KEY，或 KB_API_READ_KEY 与 KB_API_ADMIN_KEY。"
+            "仅本机开发请使用 127.0.0.1 或 localhost。"
+        )
 
 def _key_matches(supplied: str, expected: str) -> bool:
     """比较 API Key。
@@ -107,8 +166,19 @@ def _doc_out(doc, include_text: bool = False, expose_paths: bool = False) -> Doc
     )
 
 
-def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None) -> FastAPI:
+def create_app(
+    kb: KnowledgeBase | None = None,
+    settings: Settings | None = None,
+    bind_host: str | None = None,
+    *,
+    warn_open_auth: bool = True,
+) -> FastAPI:
     settings = settings or Settings()
+    host = (bind_host or "").strip() or settings.api_host
+    # 在构造知识库之前拒绝，避免无 Key 对外监听时还去加载模型。
+    ensure_api_bind_allowed(settings, host)
+    if warn_open_auth and api_auth_disabled(settings):
+        logger.warning(OPEN_AUTH_WARNING.format(host=host))
     kb = kb or KnowledgeBase(settings)
 
     app = FastAPI(title="kbagent REST API", version="0.1.0")
@@ -140,9 +210,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
 
     def _keys() -> tuple[str, str]:
         # 旧 api_key 视为 admin；未配置 admin 时 admin 端点不可用（除非完全没有 Key）
-        admin = settings.api_admin_key or settings.api_key
-        read = settings.api_read_key or admin
-        return read, admin
+        return configured_api_keys(settings)
 
     def _check_key(request: Request, admin_required: bool) -> None:
         read_key, admin_key = _keys()
@@ -353,6 +421,9 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
 
     @app.get("/v1/health")
     def health():
-        return {"status": "ok"}
+        vision = kb.vision_status()
+        # 文本库仍可用。请求了多模态但索引器没起来时，健康检查标成 degraded。
+        status = "degraded" if vision.get("enabled") and vision.get("error") else "ok"
+        return {"status": status, "vision": vision}
 
     return app

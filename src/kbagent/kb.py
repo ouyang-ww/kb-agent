@@ -107,12 +107,19 @@ class KnowledgeBase:
             max_parent_chars=self.settings.max_parent_chars,
             mode=self.settings.parent_mode,
         )
+        self._vision_error: str | None = None
         self._vision_indexer = vision_indexer
         if self._vision_indexer is None and self.settings.multimodal_enabled:
             try:
                 self._vision_indexer = VisionIndexer(self.settings, self._llm)
-            except Exception:
+            except Exception as exc:
                 self._vision_indexer = None
+                self._vision_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "VisionIndexer 初始化失败，多模态索引已关闭: %s",
+                    self._vision_error,
+                    exc_info=True,
+                )
         self._indexer = Indexer(
             self.settings,
             self._embedder,
@@ -274,8 +281,18 @@ class KnowledgeBase:
             self.governance.record_audit("document.unhide", doc_id, actor=actor)
             return True
 
+    def vision_status(self) -> dict[str, Any]:
+        """多模态是否启用、索引器是否可用，以及初始化失败原因。"""
+        return {
+            "enabled": bool(self.settings.multimodal_enabled),
+            "available": self._vision_indexer is not None,
+            "error": self._vision_error,
+        }
+
     def stats(self) -> dict[str, Any]:
-        return self._indexer.stats()
+        data = self._indexer.stats()
+        data["vision"] = self.vision_status()
+        return data
 
     def repair(self) -> dict[str, Any]:
         """对账向量库与文档库，可重复执行。

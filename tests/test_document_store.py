@@ -59,6 +59,35 @@ def test_media_roundtrip(tmp_path):
     assert got.media[0].caption == "描述"
 
 
+def test_upsert_preserves_created_at(tmp_path):
+    store = SQLiteDocumentStore(tmp_path / "docs.sqlite3")
+    store.upsert(
+        Document(
+            doc_id="a",
+            title="旧标题",
+            full_text="旧正文",
+            created_at="2020-01-01T00:00:00+00:00",
+            updated_at="2020-01-01T00:00:00+00:00",
+        )
+    )
+    store.upsert(
+        Document(
+            doc_id="a",
+            title="新标题",
+            full_text="新正文",
+            created_at="2024-06-01T00:00:00+00:00",
+            updated_at="2024-06-01T00:00:00+00:00",
+        )
+    )
+    got = store.get("a")
+    assert got is not None
+    assert got.title == "新标题"
+    assert got.full_text == "新正文"
+    assert got.created_at == "2020-01-01T00:00:00+00:00"
+    assert got.updated_at == "2024-06-01T00:00:00+00:00"
+    store.close()
+
+
 def test_delete(tmp_path):
     store = SQLiteDocumentStore(tmp_path / "docs.sqlite3")
     store.upsert(Document(doc_id="a", title="a", full_text="x"))

@@ -5,6 +5,8 @@ from kbagent.retrieval.parent_expander import ParentExpander
 from kbagent.retrieval.reranker import Reranker
 from kbagent.retrieval.retriever import Retriever
 
+from helpers import FakeEmbedder
+
 
 def test_search_returns_top_hit(kb):
     kb.ingest_text("猫是常见的宠物动物。", title="猫")
@@ -119,3 +121,139 @@ def test_media_in_retrieval_hit(kb):
     hits = retriever.search("架构图", top_k=3)
     img_hits = [h for h in hits if h.media]
     assert img_hits and img_hits[0].media.image_path == "/tmp/img.png"
+
+
+class _NearFarEmbedder:
+    """查询与 HIDDEN 文本重合，VISIBLE 文本落在另一维，用来固定排序。"""
+
+    def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        vectors = []
+        for text in texts:
+            if text.startswith("HIDDEN"):
+                vectors.append([1.0, 0.0])
+            else:
+                vectors.append([0.0, 1.0])
+        return vectors
+
+
+class _ScriptedVectors:
+    def __init__(self, hits) -> None:
+        self.hits = hits
+        self.asked: list[int] = []
+
+    def query(self, collection, embedding, top_k, where=None):
+        self.asked.append(top_k)
+        return self.hits[:top_k]
+
+    def count(self, collection) -> int:
+        return len(self.hits)
+
+
+def _hit(chunk_id: str, doc_id: str, score: float):
+    from kbagent.vectorstore.base import VectorHit
+
+    return VectorHit(
+        id=chunk_id,
+        document=doc_id,
+        metadata={"doc_id": doc_id, "title": doc_id},
+        score=score,
+    )
+
+
+def test_visible_hits_beyond_first_window(tmp_path):
+    """前 top_k*3 全是隐藏时，仍返回后面的可见结果。"""
+    from kbagent.config import Settings
+
+    hidden = [_hit(f"h{i}", f"hid{i}", 1 - i * 0.01) for i in range(9)]
+    visible = [_hit(f"v{i}", f"vis{i}", 0.2 - i * 0.01) for i in range(4)]
+    store = _ScriptedVectors(hidden + visible)
+    settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")
+    retriever = Retriever(
+        FakeEmbedder(),
+        store,
+        settings,
+        doc_visibility=lambda doc_id: str(doc_id).startswith("vis"),
+    )
+    hits = retriever.search("q", top_k=3)
+    assert [hit.doc_id for hit in hits] == ["vis0", "vis1", "vis2"]
+    assert store.asked == [9, 13]
+
+    short = retriever.search("q", top_k=5)
+    assert [hit.doc_id for hit in short] == ["vis0", "vis1", "vis2", "vis3"]
+
+
+def test_hidden_window_expands_without_count(tmp_path):
+    from kbagent.config import Settings
+
+    class _NoCount(_ScriptedVectors):
+        def count(self, collection) -> int:
+            raise RuntimeError("count unavailable")
+
+    hidden = [_hit(f"h{i}", f"hid{i}", 1 - i * 0.01) for i in range(9)]
+    visible = [_hit(f"v{i}", f"vis{i}", 0.2) for i in range(2)]
+    store = _NoCount(hidden + visible)
+    settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")
+    retriever = Retriever(
+        FakeEmbedder(),
+        store,
+        settings,
+        doc_visibility=lambda doc_id: str(doc_id).startswith("vis"),
+    )
+    hits = retriever.search("q", top_k=2)
+    assert [hit.doc_id for hit in hits] == ["vis0", "vis1"]
+    assert store.asked[0] == 6
+    assert store.asked[-1] >= 11
+
+
+def test_search_finds_visible_docs_behind_hidden_neighbors(tmp_path):
+    """治理把前排近邻标成隐藏/私有后，默认检索仍能凑满 top_k 条可见。"""
+    from kbagent.config import Settings
+    from kbagent.kb import KnowledgeBase
+
+    from helpers import FakeLLM
+
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=False,
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    kb = KnowledgeBase(settings, embedder=_NearFarEmbedder(), llm=FakeLLM())
+    try:
+        hidden_ids = []
+        for i in range(6):
+            doc_id = kb.ingest_text(f"HIDDEN hide {i} alpha", title=f"h{i}")
+            assert kb.hide_document(doc_id)
+            hidden_ids.append(doc_id)
+        for i in range(3):
+            doc_id = kb.ingest_text(
+                f"HIDDEN private {i} alpha", title=f"p{i}", scope="private"
+            )
+            hidden_ids.append(doc_id)
+        visible_ids = []
+        for i in range(3):
+            doc_id = kb.ingest_text(f"VISIBLE public {i} beta", title=f"v{i}")
+            visible_ids.append(doc_id)
+
+        hits = kb.search("anything", top_k=3)
+        assert len(hits) == 3
+        assert {hit.doc_id for hit in hits} == set(visible_ids)
+        assert all(kb.get_document(doc_id) is None for doc_id in hidden_ids)
+        assert kb.get_doc_meta(hidden_ids[0]).status == "hidden"
+        private_meta = kb.get_doc_meta(hidden_ids[-1])
+        assert private_meta is not None
+        assert private_meta.scope == "private"
+        assert private_meta.status == "active"
+
+        revealed = kb.search("anything", top_k=3, include_hidden=True)
+        assert len(revealed) == 3
+        assert {hit.doc_id for hit in revealed} <= set(hidden_ids)
+    finally:
+        kb.close()

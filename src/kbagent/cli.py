@@ -329,18 +329,36 @@ def study_disable():
 # ================= 服务 =================
 @app.command()
 def serve(
-    host: str = typer.Option(None),
+    host: str = typer.Option(None, help="监听地址。非回环地址必须配置 API Key"),
     port: int = typer.Option(None),
 ):
-    """启动 REST API 服务（uvicorn）。"""
+    """启动 REST API 服务（uvicorn）。
+
+    未配置 API Key 时只能监听本机回环地址，并打印警告。
+    绑定 0.0.0.0 等非回环地址且没有 Key 时拒绝启动。
+    """
     import uvicorn
+
+    from .api.server import (
+        OPEN_AUTH_WARNING,
+        api_auth_disabled,
+        create_app,
+        ensure_api_bind_allowed,
+    )
+    from .errors import ConfigError
 
     settings = Settings()
     host = host or settings.api_host
     port = port or settings.api_port
-    from .api.server import create_app
-
-    app_ = create_app(settings=settings)
+    try:
+        ensure_api_bind_allowed(settings, host)
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    if api_auth_disabled(settings):
+        typer.echo(OPEN_AUTH_WARNING.format(host=host), err=True)
+    # CLI 已经打印过警告，避免日志再打一遍。
+    app_ = create_app(settings=settings, bind_host=host, warn_open_auth=False)
     typer.echo(f"REST API: http://{host}:{port}  (docs: /docs)")
     uvicorn.run(app_, host=host, port=port)
 

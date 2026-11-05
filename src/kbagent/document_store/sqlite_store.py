@@ -130,14 +130,33 @@ class SQLiteDocumentStore:
         # 绑定原件不把整篇正文写入应用库
         full_text = "" if doc.source_kind == SOURCE_BOUND else doc.full_text
         with self._lock:
+            # 同 doc_id 再次写入时保留库里的 created_at。
+            # INSERT OR REPLACE 会先删后插，调用方若带上「现在」就会抹掉创建时间。
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO documents(
+                INSERT INTO documents(
                   doc_id, title, source_path, doc_type, content_hash,
                   metadata, collection, created_at, updated_at, full_text,
                   chunk_ids, media, scope, status, summary, source_kind,
                   chunk_locations
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                  title=excluded.title,
+                  source_path=excluded.source_path,
+                  doc_type=excluded.doc_type,
+                  content_hash=excluded.content_hash,
+                  metadata=excluded.metadata,
+                  collection=excluded.collection,
+                  created_at=documents.created_at,
+                  updated_at=excluded.updated_at,
+                  full_text=excluded.full_text,
+                  chunk_ids=excluded.chunk_ids,
+                  media=excluded.media,
+                  scope=excluded.scope,
+                  status=excluded.status,
+                  summary=excluded.summary,
+                  source_kind=excluded.source_kind,
+                  chunk_locations=excluded.chunk_locations
                 """,
                 (
                     doc.doc_id,

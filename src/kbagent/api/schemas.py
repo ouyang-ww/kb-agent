@@ -79,6 +79,12 @@ class DocumentOut(BaseModel):
     full_text: str | None = None
 
 
+class VisionStatusOut(BaseModel):
+    enabled: bool = False
+    available: bool = False
+    error: str | None = None
+
+
 class StatsOut(BaseModel):
     documents: int
     chunks: int
@@ -86,6 +92,7 @@ class StatsOut(BaseModel):
     by_source_kind: dict[str, int] = {}
     collections: list[str] = []
     chunks_by_collection: dict[str, int] = {}
+    vision: VisionStatusOut = Field(default_factory=VisionStatusOut)
 
 
 class IngestResponse(BaseModel):

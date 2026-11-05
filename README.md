@@ -54,7 +54,8 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 | KB_MULTIMODAL_ENABLED | true | 图片提取 + 描述（视觉模型） |
 | KB_VISION_LLM_MODEL | 空 | 答案生成时看图（如 qwen-vl / glm-4v） |
 | KB_OCR_ENABLED | false | PaddleOCR（需 `pip install kb-agent[vision]`） |
-| KB_API_KEY / KB_API_READ_KEY / KB_API_ADMIN_KEY | 空 | REST 鉴权；`KB_API_KEY` 兼容旧配置，等同 admin |
+| KB_API_KEY / KB_API_READ_KEY / KB_API_ADMIN_KEY | 空 | REST 鉴权；`KB_API_KEY` 兼容旧配置，等同 admin。都为空时只允许本机回环 |
+| KB_API_REQUIRE_AUTH | false | 为 true 时即使 `127.0.0.1` 也必须配置 Key，否则拒绝启动 |
 | KB_MAX_UPLOAD_BYTES | 20971520 | `POST /v1/ingest/file` 单次上限，超过返回 413 |
 | KB_MAX_CONCURRENT_UPLOADS | 4 | 同时处理的上传数，多余请求排队 |
 | KB_EXPOSE_SOURCE_PATHS | false | 对外响应是否带绝对路径；默认去掉 |
@@ -142,16 +143,16 @@ kb.delete_document(doc_id); kb.stats()
 | GET /v1/settings/embedding | 当前 embedding manifest |
 | GET /v1/answer-log / GET /v1/audit-log | 答案日志 / 审计日志 |
 | POST /v1/governance/backfill | 旧文档 docs_meta 回填 |
-| GET /v1/stats / GET /v1/health | 统计 / 健康检查 |
+| GET /v1/stats / GET /v1/health | 统计 / 健康检查（含 vision；初始化失败时 health 为 degraded） |
 
-鉴权：配置 `KB_API_KEY`（等同 admin）或 `KB_API_READ_KEY` / `KB_API_ADMIN_KEY` 后，业务端点要求 `X-API-Key` 头；只读 Key 不能执行入库、删除、开关等管理操作。
+鉴权：配置 `KB_API_KEY`（等同 admin）或 `KB_API_READ_KEY` / `KB_API_ADMIN_KEY` 后，业务端点要求 `X-API-Key` 头；只读 Key 不能执行入库、删除、开关等管理操作。未配置任何 Key 时，`kb serve` 只能监听回环地址（`127.0.0.1` / `localhost` / `::1`），启动时打印一次警告，入库与删除对本机开放。`--host 0.0.0.0` 或其它非回环地址且没有 Key 时拒绝启动。`KB_API_REQUIRE_AUTH=true` 时，本机也必须配置 Key。库集成若自己调用 uvicorn，请把同一监听地址传给 `create_app(..., bind_host=...)`。
 
 完整示例见 `examples/use_as_library.py` 与 `examples/call_api.py`。
 
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 110 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象/治理
+.venv/bin/python -m pytest -q          # 175 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象/治理
 ```
 
 ## 目录结构
