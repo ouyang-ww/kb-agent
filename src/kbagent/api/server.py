@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hmac
+import secrets
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -30,11 +30,22 @@ from .schemas import (
 )
 
 def _key_matches(supplied: str, expected: str) -> bool:
-    """比较 API Key。长度不同或含非 ASCII 时拒绝，避免鉴权抛错变成 500。"""
-    if not supplied or not expected or len(supplied) != len(expected):
+    """比较 API Key。
+
+    统一按 UTF-8 字节做 ``secrets.compare_digest``。3.10–3.12 上对不等长
+    ``str`` 调用 ``hmac.compare_digest`` 会 ``ValueError``，非 ASCII 会
+    ``TypeError``；未捕获时错误 Key 会变成 500。字节比较在这些版本上对
+    不等长输入返回 False，不会把鉴权失败变成异常。
+    """
+    if not isinstance(supplied, str) or not isinstance(expected, str):
+        return False
+    if not supplied or not expected:
         return False
     try:
-        return hmac.compare_digest(supplied, expected)
+        return secrets.compare_digest(
+            supplied.encode("utf-8"),
+            expected.encode("utf-8"),
+        )
     except (TypeError, ValueError):
         return False
 

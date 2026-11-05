@@ -114,6 +114,9 @@ def test_unequal_length_api_key_is_rejected(tmp_path):
     assert _key_matches("secret-extra", "secret") is False
     assert _key_matches("密" * len("secret"), "secret") is False
     assert _key_matches("secret", "secret") is True
+    # HTTP 头本身只能是 ASCII；这里直接覆盖函数，避免 str compare_digest 的 TypeError。
+    assert _key_matches("密钥-secret", "密钥-secret") is True
+    assert _key_matches("密钥", "密钥-secret") is False
 
     c = _make_client(tmp_path, api_key="secret")
     assert c.get("/v1/stats", headers={"X-API-Key": "sec"}).status_code == 401
@@ -123,6 +126,22 @@ def test_unequal_length_api_key_is_rejected(tmp_path):
         == 401
     )
     assert c.get("/v1/stats", headers={"X-API-Key": "secret"}).status_code == 200
+
+
+def test_key_compare_exception_stays_unauthorized(tmp_path, monkeypatch):
+    """3.10–3.12 的 str compare_digest 会 ValueError；比较失败必须仍是 401。"""
+    import kbagent.api.server as server
+
+    def boom(left, right):
+        raise ValueError("lengths must match")
+
+    monkeypatch.setattr(server.secrets, "compare_digest", boom)
+    assert server._key_matches("ab", "abcd") is False
+    assert server._key_matches("secret", "secret") is False
+
+    c = _make_client(tmp_path, api_key="secret")
+    assert c.get("/v1/stats", headers={"X-API-Key": "nope"}).status_code == 401
+    assert c.get("/v1/stats", headers={"X-API-Key": "secret"}).status_code == 401
 
 
 def test_runtime_flags_api(tmp_path):

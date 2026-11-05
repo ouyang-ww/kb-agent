@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -29,6 +30,8 @@ from .storage.factory import make_document_store, make_vector_store
 from .storage.filters import Where, eq
 from .vectorstore.base import VectorStore
 from .vision.indexer import VisionIndexer
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeBase:
@@ -461,7 +464,9 @@ class KnowledgeBase:
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
             except Exception:
-                pass
+                # 写日志失败不能吞掉已经生成的答案，但必须留下痕迹。
+                logger.exception("写入 answer_log 失败，答案仍会返回")
+                answer.meta["answer_log_error"] = True
             return answer
 
     # ================= 工具 =================

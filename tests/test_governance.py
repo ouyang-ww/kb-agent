@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from kbagent.config import Settings
@@ -151,6 +153,35 @@ def test_answer_log_recorded(tmp_path):
         assert rows[0]["answer"] == answer.text
         assert rows[0]["citations"]
         assert rows[0]["latency_ms"] is not None
+        assert "answer_log_error" not in answer.meta
+    finally:
+        kb.close()
+
+
+def test_ask_answer_log_failure_is_not_silent(tmp_path, caplog):
+    """log_answer 失败时答案仍返回，且日志和 meta 都留有痕迹。"""
+    kb = _kb(tmp_path)
+    try:
+        kb.ingest_text("向量检索的核心是 embedding。", title="向量")
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("answer_log 写入失败")
+
+        kb.governance.log_answer = explode
+        with caplog.at_level(logging.ERROR, logger="kbagent.kb"):
+            answer = kb.ask("向量检索的核心是什么？")
+
+        assert answer.text
+        assert answer.meta.get("answer_log_error") is True
+        failures = [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.ERROR and "answer_log" in record.getMessage()
+        ]
+        assert failures, "answer_log 失败不能完全无日志"
+        assert failures[0].exc_info is not None
+        assert isinstance(failures[0].exc_info[1], RuntimeError)
+        assert kb.list_answers() == []
     finally:
         kb.close()
 
