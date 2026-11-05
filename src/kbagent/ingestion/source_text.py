@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..models import Chunk, ChunkLocation
 from .cleaner import Cleaner
-from .loaders import content_hash, load_file
+from .loaders import content_hash, hashes_equal, load_file
 
 # 摘要是派生摘录，不是整篇原件。短笔记可以整段落入摘要。
 SUMMARY_MAX_CHARS = 240
@@ -69,7 +69,8 @@ def read_verified_source(path: str | Path, expected_hash: str) -> str | None:
     if not (expected_hash or "").strip():
         return None
     cleaned = read_cleaned_source(path)
-    if content_hash(cleaned) != expected_hash:
+    # 旧库只存了 12 hex。前缀能对上才回读；对不上视为漂移，不把新文件送进提示词。
+    if not hashes_equal(expected_hash, content_hash(cleaned)):
         return None
     return cleaned
 

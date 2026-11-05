@@ -157,9 +157,12 @@ def list(
     if not docs:
         typer.echo("知识库为空")
         raise typer.Exit(0)
-    typer.echo(f"{'doc_id':<14} {'chunks':>6}  {'media':>5}  title")
+    width = max(14, *(len(d.doc_id) for d in docs))
+    typer.echo(f"{'doc_id':<{width}} {'chunks':>6}  {'media':>5}  title")
     for d in docs:
-        typer.echo(f"{d.doc_id:<14} {d.chunk_count:>6}  {d.media_count:>5}  {d.title}")
+        typer.echo(
+            f"{d.doc_id:<{width}} {d.chunk_count:>6}  {d.media_count:>5}  {d.title}"
+        )
 
 
 @app.command()

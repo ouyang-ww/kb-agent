@@ -21,6 +21,8 @@ class DocumentStore(Protocol):
 
     def get_by_hash(self, content_hash: str) -> Document | None: ...
 
+    def list_by_hash(self, content_hash: str) -> list[Document]: ...
+
     def list(
         self,
         collection: str | None = None,

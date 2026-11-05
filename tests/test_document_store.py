@@ -24,6 +24,15 @@ def test_get_by_hash_dedup(tmp_path):
     assert store.get_by_hash("nope") is None
 
 
+def test_get_by_hash_refuses_conflicting_rows(tmp_path):
+    store = SQLiteDocumentStore(tmp_path / "docs.sqlite3")
+    store.upsert(Document(doc_id="a", title="a", full_text="one", content_hash="same"))
+    store.upsert(Document(doc_id="b", title="b", full_text="two", content_hash="same"))
+    assert store.list_by_hash("same")[0].doc_id == "a"
+    assert len(store.list_by_hash("same")) == 2
+    assert store.get_by_hash("same") is None
+
+
 def test_list_and_stats(tmp_path):
     store = SQLiteDocumentStore(tmp_path / "docs.sqlite3")
     store.upsert(Document(doc_id="a", title="a", full_text="x", collection="c1",

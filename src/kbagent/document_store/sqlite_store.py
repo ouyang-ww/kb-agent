@@ -8,6 +8,7 @@ SQL 全部收敛在本模块，外部只依赖 Document 模型与中立 Filter�
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from typing import Any
@@ -19,6 +20,8 @@ from ..models import (
     MediaRef,
 )
 from ..storage.filters import Where, compile_sql
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -215,12 +218,44 @@ class SQLiteDocumentStore:
             ).fetchone()
         return self._row_to_doc(row) if row else None
 
-    def get_by_hash(self, content_hash: str) -> Document | None:
+    def list_by_hash(self, content_hash: str) -> list[Document]:
+        """同一 ``content_hash`` 的全部行。空哈希不查，避免把未填哈希的文档扫出来。"""
+        key = (content_hash or "").strip()
+        if not key:
+            return []
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM documents WHERE content_hash = ?", (content_hash,)
-            ).fetchone()
-        return self._row_to_doc(row) if row else None
+            rows = self._conn.execute(
+                "SELECT * FROM documents WHERE content_hash = ? ORDER BY doc_id",
+                (key,),
+            ).fetchall()
+        return [self._row_to_doc(row) for row in rows]
+
+    def get_by_hash(self, content_hash: str) -> Document | None:
+        """按哈希取一行用于去重。
+
+        只有一行时返回它。多行但全文相同，视为真重复，返回第一行。
+        多行且全文不一致（截断哈希碰撞，或库已损坏）时不任取一行，返回 None，
+        调用方应继续入库或告警，而不是跳过。
+        """
+        rows = self.list_by_hash(content_hash)
+        if not rows:
+            return None
+        if len(rows) == 1:
+            return rows[0]
+        bodies = {(row.full_text or "") for row in rows}
+        ids = [row.doc_id for row in rows]
+        if len(bodies) == 1:
+            logger.warning(
+                "content_hash 命中 %d 行且全文相同，按重复处理: %s",
+                len(rows),
+                ids,
+            )
+            return rows[0]
+        logger.warning(
+            "content_hash 碰撞且全文不一致，拒绝任取一行: %s",
+            ids,
+        )
+        return None
 
     def list(
         self,

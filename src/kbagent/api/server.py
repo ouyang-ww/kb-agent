@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import tempfile
 from pathlib import Path
@@ -50,44 +51,54 @@ def _key_matches(supplied: str, expected: str) -> bool:
         return False
 
 
-def _media_out(m: MediaRef | None) -> MediaOut | None:
+def public_source_path(path: str, expose: bool) -> str:
+    """对外响应里的路径。默认去掉绝对路径；相对路径仍可返回。"""
+    raw = path or ""
+    if not raw or expose:
+        return raw
+    if Path(raw).is_absolute():
+        return ""
+    return raw
+
+
+def _media_out(m: MediaRef | None, expose_paths: bool = False) -> MediaOut | None:
     if m is None:
         return None
     return MediaOut(
         media_type=m.media_type,
-        image_path=m.image_path,
+        image_path=public_source_path(m.image_path, expose_paths),
         page=m.page,
         caption=m.caption,
     )
 
 
-def _hit_out(h) -> HitOut:
+def _hit_out(h, expose_paths: bool = False) -> HitOut:
     return HitOut(
         chunk_id=h.chunk_id,
         doc_id=h.doc_id,
         title=h.title,
-        source_path=h.source_path,
+        source_path=public_source_path(h.source_path, expose_paths),
         section=h.section,
         score=round(h.score, 4),
         snippet=h.text[:300],
-        media=_media_out(h.media),
+        media=_media_out(h.media, expose_paths),
     )
 
 
-def _doc_out(doc, include_text: bool = False) -> DocumentOut:
+def _doc_out(doc, include_text: bool = False, expose_paths: bool = False) -> DocumentOut:
     # 绑定原件的正文不在库里，响应也不附带整篇正文。
     include_body = include_text and doc.source_kind != SOURCE_BOUND
     return DocumentOut(
         doc_id=doc.doc_id,
         title=doc.title,
-        source_path=doc.source_path,
+        source_path=public_source_path(doc.source_path, expose_paths),
         doc_type=doc.doc_type,
         collection=doc.collection,
         metadata=doc.metadata,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         chunk_count=doc.chunk_count,
-        media=[_media_out(m) for m in doc.media if m is not None],
+        media=[_media_out(m, expose_paths) for m in doc.media if m is not None],
         scope=doc.scope,
         status=doc.status,
         source_kind=doc.source_kind,
@@ -101,6 +112,31 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
     kb = kb or KnowledgeBase(settings)
 
     app = FastAPI(title="kbagent REST API", version="0.1.0")
+    upload_slots = asyncio.Semaphore(settings.max_concurrent_uploads)
+    upload_chunk = 1024 * 1024
+
+    def _expose_paths() -> bool:
+        return bool(settings.expose_source_paths)
+
+    def _upload_too_large() -> HTTPException:
+        return HTTPException(
+            status_code=413,
+            detail=f"上传超过上限 {settings.max_upload_bytes} 字节",
+        )
+
+    async def _write_limited(src: UploadFile, dest) -> None:
+        limit = settings.max_upload_bytes
+        if src.size is not None and src.size > limit:
+            raise _upload_too_large()
+        total = 0
+        while True:
+            chunk = await src.read(upload_chunk)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise _upload_too_large()
+            dest.write(chunk)
 
     def _keys() -> tuple[str, str]:
         # 旧 api_key 视为 admin；未配置 admin 时 admin 端点不可用（除非完全没有 Key）
@@ -132,7 +168,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
             where=req.where,
             collection=req.collection,
         )
-        return SearchResponse(hits=[_hit_out(h) for h in hits])
+        return SearchResponse(hits=[_hit_out(h, _expose_paths()) for h in hits])
 
     @app.post("/v1/ask", response_model=AskResponse, dependencies=[Depends(auth_read)])
     def ask(req: QueryRequest):
@@ -148,11 +184,11 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
                 SourceOut(
                     doc_id=s.doc_id,
                     title=s.title,
-                    source_path=s.source_path,
+                    source_path=public_source_path(s.source_path, _expose_paths()),
                     score=round(s.score, 4),
                     snippet=s.snippet,
                     section=s.section,
-                    media=_media_out(s.media),
+                    media=_media_out(s.media, _expose_paths()),
                 )
                 for s in ans.sources
             ],
@@ -184,37 +220,47 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
         collection: str | None = None,
         scope: str | None = None,
     ):
+        limit = settings.max_upload_bytes
+        if file.size is not None and file.size > limit:
+            raise _upload_too_large()
         suffix = Path(file.filename or "").suffix or ".txt"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await file.read())
-            tmp_path = Path(tmp.name)
+        upload_dir = settings.storage_dir / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path | None = None
         try:
-            # 上传文件没有可长期绑定的外部路径，临时文件删掉后按 inline 保存正文。
-            try:
-                raws = load_file(tmp_path)
-            except IngestError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            if not raws:
-                raise HTTPException(status_code=422, detail="没有可入库的内容")
-            raw = raws[0]
-            meta = dict(raw.get("metadata") or {})
-            if file.filename:
-                meta["upload_name"] = file.filename
-            title = Path(file.filename).stem if file.filename else raw.get("title")
-            try:
-                doc_id = kb.ingest_text(
-                    raw.get("content") or "",
-                    title=title,
-                    source_path="",
-                    doc_type=raw.get("doc_type") or "text",
-                    collection=collection,
-                    metadata=meta,
-                    scope=scope,
-                )
-            except IngestError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            async with upload_slots:
+                with tempfile.NamedTemporaryFile(
+                    suffix=suffix, delete=False, dir=upload_dir
+                ) as tmp:
+                    tmp_path = Path(tmp.name)
+                    await _write_limited(file, tmp)
+                # 上传文件没有可长期绑定的外部路径，临时文件删掉后按 inline 保存正文。
+                try:
+                    raws = load_file(tmp_path)
+                except IngestError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                if not raws:
+                    raise HTTPException(status_code=422, detail="没有可入库的内容")
+                raw = raws[0]
+                meta = dict(raw.get("metadata") or {})
+                if file.filename:
+                    meta["upload_name"] = file.filename
+                title = Path(file.filename).stem if file.filename else raw.get("title")
+                try:
+                    doc_id = kb.ingest_text(
+                        raw.get("content") or "",
+                        title=title,
+                        source_path="",
+                        doc_type=raw.get("doc_type") or "text",
+                        collection=collection,
+                        metadata=meta,
+                        scope=scope,
+                    )
+                except IngestError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
         if doc_id:
             return IngestResponse(doc_id=doc_id, status="added", path=file.filename)
         return IngestResponse(doc_id=None, status="skipped", path=file.filename)
@@ -222,14 +268,20 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
     # ---- 文档管理 ----
     @app.get("/v1/documents", response_model=list[DocumentOut], dependencies=[Depends(auth_read)])
     def list_documents(collection: str | None = None):
-        return [_doc_out(d) for d in kb.list_documents(collection)]
+        return [
+            _doc_out(d, expose_paths=_expose_paths())
+            for d in kb.list_documents(collection)
+        ]
 
     @app.get("/v1/documents/{doc_id}", response_model=DocumentOut, dependencies=[Depends(auth_read)])
-    def get_document(doc_id: str):
+    def get_document(doc_id: str, include_text: bool = False):
+        """读取文档。默认不含全文；``include_text=true`` 才返回 inline 正文。"""
         doc = kb.get_document(doc_id)
         if doc is None:
             raise HTTPException(status_code=404, detail="文档不存在")
-        return _doc_out(doc, include_text=True)
+        return _doc_out(
+            doc, include_text=include_text, expose_paths=_expose_paths()
+        )
 
     @app.delete("/v1/documents/{doc_id}", dependencies=[Depends(auth_admin)])
     def delete_document(doc_id: str):

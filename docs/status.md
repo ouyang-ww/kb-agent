@@ -62,12 +62,26 @@
 - 学习扩展（概念、题库、队列、周报）尚未实现。按 PLAN §0.1，它是当前 MVP 主路径，仍然是独立模块：托盘默认开，库与组件默认关
 - 父文档扩写会整篇回读并重新清洗源文件；`KB_MAX_PARENT_CHARS` 只限制返回窗口
 - 绑定文件在入库后被修改时，扩写核对 `content_hash`，不一致则退回切块文本，不把漂移后的文件送进提示词；文件缺失同样退回切块文本。切块与源文件重新对齐要重新入库
-- REST 仍返回 `source_path`。用 Obsidian 或系统应用打开原文，以及对外响应去掉绝对路径，留在 §5 第 4 条，不挡住本 PR
+- 对外 REST 默认去掉绝对 `source_path` / `image_path`（`KB_EXPOSE_SOURCE_PATHS` 默认关）。`GET /v1/documents/{doc_id}` 默认不含全文，`include_text=true` 才返回 inline 正文。用 Obsidian 或系统应用打开原文仍留在 §5 第 4 条
+- `content_hash` 与新文档 `doc_id` 存完整 SHA256（64 hex）。展示可以只用前 12 hex（`hash_display`），去重和主键不用截断值。见下方「哈希迁移」
 - `orphaned_copy` 表示源文件已经不在，库内全文留到用户处理。把文件放回且哈希一致后再跑 `migrate-parents`，会升为 `bound` 并删掉副本
 - `diverged` 表示源文件还在，但和已入库哈希不一致（不用 `orphaned_copy`，因为文件没丢）。迁移保留正文，并在结果里提示重新入库。文件改回与哈希一致后再跑一次，才会升为 `bound` 并删掉副本
 - 过期/冲突检测、严格模式、去重尚未实现
 - 同步通道、托盘 / 小窗、MCP、打开原文尚未实现。MVP 不做移动端
 - 工作知识管理不是当前 MVP
+
+## 4.1 哈希迁移（12 hex → 64 hex）
+
+2026-11-05 之前，`content_hash` 和 `doc_id` 只存 SHA256 的前 12 hex。48 bit 碰撞时 `get_by_hash` 会取到一行并跳过另一篇入库。
+
+升级后的行为：
+
+- 新写入的 `content_hash`、`doc_id` 都是 64 hex。数据库不用改表，列本来就是文本。
+- 已有行的 12 hex 主键**保持不变**，向量和引用不用重写。再次入库同一路径，或同一标题下全文仍能对上的 inline 文档，会沿用这条 `doc_id`，并把 `content_hash` 写成完整 SHA256。路径或全文对不上时不覆盖，新文档用完整 id。
+- 去重只认完整哈希。多行共用一个哈希且全文不一致时不任取一行，也不会因此跳过新内容。
+- 父文档扩写仍接受旧的 12 hex：它必须是当前文件完整哈希的前缀，否则当作漂移，退回切块文本。
+- `kb governance migrate-parents` 会在源文件或库内正文对得上时，把 12 hex 升成 64 hex（结果里计为 `bound` 或 `hash_upgraded`）。升完后重复执行是 `unchanged`。
+- 评测集 `eval/datasets/baseline.jsonl` 已改成完整 `doc_id`。2026-11-04 QA 记录里的 12 hex 是这些 id 的前缀，不是当前主键。
 
 ## 5. 下一步
 

@@ -55,6 +55,9 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 | KB_VISION_LLM_MODEL | 空 | 答案生成时看图（如 qwen-vl / glm-4v） |
 | KB_OCR_ENABLED | false | PaddleOCR（需 `pip install kb-agent[vision]`） |
 | KB_API_KEY / KB_API_READ_KEY / KB_API_ADMIN_KEY | 空 | REST 鉴权；`KB_API_KEY` 兼容旧配置，等同 admin |
+| KB_MAX_UPLOAD_BYTES | 20971520 | `POST /v1/ingest/file` 单次上限，超过返回 413 |
+| KB_MAX_CONCURRENT_UPLOADS | 4 | 同时处理的上传数，多余请求排队 |
+| KB_EXPOSE_SOURCE_PATHS | false | 对外响应是否带绝对路径；默认去掉 |
 | KB_STUDY_ENABLED / KB_STUDY_* | false / true | 学习扩展默认值；运行时用 `kb config set` 热切换 |
 
 ## 运行时开关与治理
@@ -129,9 +132,9 @@ kb.delete_document(doc_id); kb.stats()
 | POST /v1/ask | RAG 问答（返回 text/sources/meta） |
 | POST /v1/search | 语义检索 |
 | POST /v1/ingest | JSON 文本入库 |
-| POST /v1/ingest/file | 文件上传入库（multipart） |
-| GET /v1/documents | 文档列表 |
-| GET /v1/documents/{doc_id} | 原文档全文（含 media） |
+| POST /v1/ingest/file | 文件上传入库（multipart，超过 `KB_MAX_UPLOAD_BYTES` 返回 413） |
+| GET /v1/documents | 文档列表（不含全文，不含绝对路径） |
+| GET /v1/documents/{doc_id} | 文档元数据；`?include_text=true` 才返回 inline 全文 |
 | DELETE /v1/documents/{doc_id} | 删除（级联） |
 | POST /v1/documents/{doc_id}/refresh | 更新内容 |
 | POST /v1/documents/{doc_id}/hide / unhide | 隐藏 / 恢复 |

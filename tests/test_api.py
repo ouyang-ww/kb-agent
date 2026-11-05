@@ -13,6 +13,7 @@ def _make_client(
     api_key: str = "",
     read_key: str = "",
     admin_key: str = "",
+    **extra,
 ):
     settings = Settings(
         storage_dir=tmp_path / "kb",
@@ -26,6 +27,7 @@ def _make_client(
         api_admin_key=admin_key,
         llm_api_key="test",
         llm_base_url="http://localhost:9999/v1",
+        **extra,
     )
     from kbagent.kb import KnowledgeBase
 
@@ -45,9 +47,12 @@ def test_ingest_text_and_get(tmp_path):
     assert r.status_code == 200
     doc_id = r.json()["doc_id"]
     assert doc_id
+    assert len(doc_id) == 64
     doc = c.get(f"/v1/documents/{doc_id}").json()
     assert doc["title"] == "t"
-    assert "向量检索" in doc["full_text"]
+    assert doc["full_text"] is None
+    revealed = c.get(f"/v1/documents/{doc_id}", params={"include_text": True}).json()
+    assert "向量检索" in revealed["full_text"]
 
 
 def test_ingest_file(tmp_path):
@@ -56,6 +61,46 @@ def test_ingest_file(tmp_path):
     r = c.post("/v1/ingest/file", files=files)
     assert r.status_code == 200
     assert r.json()["doc_id"]
+
+
+def test_ingest_file_over_limit_is_413_and_leaves_no_temp(tmp_path):
+    c = _make_client(tmp_path, max_upload_bytes=32)
+    files = {"file": ("big.txt", b"x" * 64, "text/plain")}
+    r = c.post("/v1/ingest/file", files=files)
+    assert r.status_code == 413
+    upload_dir = tmp_path / "kb" / "uploads"
+    # 声明了大小时在落盘前拒绝，目录可以不存在。
+    assert not upload_dir.exists() or list(upload_dir.iterdir()) == []
+
+
+def test_ingest_file_stream_over_limit_deletes_partial(tmp_path, monkeypatch):
+    """未声明大小时仍按流式计数拒绝，并删掉已经打开的临时文件。"""
+    from starlette.datastructures import UploadFile
+
+    real_init = UploadFile.__init__
+
+    def hide_size(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        self.size = None
+
+    monkeypatch.setattr(UploadFile, "__init__", hide_size)
+    c = _make_client(tmp_path, max_upload_bytes=32)
+    files = {"file": ("big.txt", b"x" * 64, "text/plain")}
+    r = c.post("/v1/ingest/file", files=files)
+    assert r.status_code == 413
+    upload_dir = tmp_path / "kb" / "uploads"
+    assert upload_dir.is_dir()
+    assert list(upload_dir.iterdir()) == []
+
+
+def test_ingest_file_at_limit_still_succeeds(tmp_path):
+    c = _make_client(tmp_path, max_upload_bytes=64)
+    files = {"file": ("ok.txt", b"y" * 64, "text/plain")}
+    r = c.post("/v1/ingest/file", files=files)
+    assert r.status_code == 200
+    assert r.json()["doc_id"]
+    upload_dir = tmp_path / "kb" / "uploads"
+    assert list(upload_dir.iterdir()) == []
 
 
 def test_ingest_empty_422(tmp_path):
@@ -241,3 +286,54 @@ def test_private_and_hidden_documents_api(tmp_path):
     assert c.post("/v1/search", json={"query": "苹果", "top_k": 5}).json()["hits"] == []
     assert c.post(f"/v1/documents/{public}/unhide").status_code == 200
     assert c.get(f"/v1/documents/{public}").status_code == 200
+
+
+def test_public_source_path_keeps_relative_paths():
+    from kbagent.api.server import public_source_path
+
+    assert public_source_path("examples/note.md", False) == "examples/note.md"
+    assert public_source_path("/tmp/note.md", False) == ""
+    assert public_source_path("/tmp/note.md", True) == "/tmp/note.md"
+    assert public_source_path("", False) == ""
+
+
+def test_responses_strip_absolute_source_path(tmp_path):
+    from kbagent.kb import KnowledgeBase
+
+    note = tmp_path / "note.md"
+    note.write_text("猫是常见的宠物动物，路径不应外泄。", encoding="utf-8")
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=False,
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=FakeLLM())
+    try:
+        doc_id = kb.ingest(note).added[0]
+        hidden = TestClient(create_app(kb=kb, settings=settings))
+        listed = hidden.get("/v1/documents").json()
+        assert listed[0]["source_path"] == ""
+        body = hidden.get(f"/v1/documents/{doc_id}").json()
+        assert body["source_path"] == ""
+        assert str(note) not in str(body)
+        hits = hidden.post(
+            "/v1/search", json={"query": "猫是常见的宠物动物", "top_k": 2}
+        ).json()["hits"]
+        assert hits
+        assert all(hit["source_path"] == "" for hit in hits)
+        assert all(str(note) not in str(hit) for hit in hits)
+        sources = hidden.post("/v1/ask", json={"query": "猫是什么？"}).json()["sources"]
+        assert sources
+        assert all(item["source_path"] == "" for item in sources)
+
+        exposed_settings = settings.model_copy(update={"expose_source_paths": True})
+        exposed = TestClient(create_app(kb=kb, settings=exposed_settings))
+        shown = exposed.get(f"/v1/documents/{doc_id}").json()
+        assert shown["source_path"] == str(note)
+    finally:
+        kb.close()

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..errors import IngestError
-from ..ingestion.loaders import content_hash
+from ..ingestion.loaders import content_hash, hashes_equal, is_legacy_hash
 from ..ingestion.source_text import align_locations, read_cleaned_source, summarize
 from ..models import (
     SOURCE_BOUND,
@@ -103,6 +103,8 @@ def _mark_diverged(
 
 def _mark_orphaned(doc: Document, chunks: list | None) -> str:
     if doc.source_kind == SOURCE_ORPHANED and doc.full_text:
+        if _upgrade_legacy_hash(doc, doc.full_text):
+            return "hash_upgraded"
         return "unchanged"
     summary = doc.summary or (summarize(doc.full_text) if doc.full_text else "")
     locations = (
@@ -120,11 +122,14 @@ def _mark_orphaned(doc: Document, chunks: list | None) -> str:
     doc.chunk_locations = locations
     doc.source_kind = SOURCE_ORPHANED
     _touch(doc)
+    _upgrade_legacy_hash(doc, doc.full_text)
     return "orphaned_copy"
 
 
 def _mark_inline(doc: Document, chunks: list | None) -> str:
     if doc.source_kind == SOURCE_INLINE and not (doc.source_path or "").strip():
+        if _upgrade_legacy_hash(doc, doc.full_text):
+            return "hash_upgraded"
         return "unchanged"
     summary = doc.summary or (summarize(doc.full_text) if doc.full_text else "")
     locations = (
@@ -137,13 +142,31 @@ def _mark_inline(doc: Document, chunks: list | None) -> str:
     doc.chunk_locations = locations
     doc.source_path = ""
     _touch(doc)
+    _upgrade_legacy_hash(doc, doc.full_text)
     return "inline"
+
+
+def _upgrade_legacy_hash(doc: Document, text: str) -> bool:
+    """旧 12 hex 若确是 ``text`` 的前缀，就地写成完整 SHA256。
+
+    对不上不改：不能把另一篇正文的哈希安到这条记录上。
+    """
+    stored = (doc.content_hash or "").strip()
+    if not is_legacy_hash(stored) or not (text or "").strip():
+        return False
+    full = content_hash(text)
+    if not hashes_equal(stored, full):
+        return False
+    doc.content_hash = full
+    _touch(doc)
+    return True
 
 
 def migrate_document(doc: Document, chunks: list | None = None) -> str:
     """就地更新 ``doc``。
 
-    返回 ``bound`` / ``inline`` / ``orphaned_copy`` / ``diverged`` / ``unchanged``。
+    返回 ``bound`` / ``inline`` / ``orphaned_copy`` / ``diverged`` /
+    ``hash_upgraded`` / ``unchanged``。
     ``chunks`` 是向量库里已经存在的切块，用来对齐定位，不会触发重新切块。
     """
     path = (doc.source_path or "").strip()
@@ -151,9 +174,19 @@ def migrate_document(doc: Document, chunks: list | None = None) -> str:
     body = doc.full_text or ""
 
     # 已经是绑定且没有库内正文：文件随后漂移由扩写拒绝，迁移补不回正文。
+    # 仍可以把旧的 12 hex 升成完整哈希（对得上当前文件时）。
     if doc.source_kind == SOURCE_BOUND and not body:
+        if exists and is_legacy_hash(doc.content_hash):
+            try:
+                cleaned = read_cleaned_source(path)
+            except (OSError, IngestError):
+                return "unchanged"
+            if _upgrade_legacy_hash(doc, cleaned):
+                return "hash_upgraded"
         return "unchanged"
     if doc.source_kind == SOURCE_INLINE and not path:
+        if _upgrade_legacy_hash(doc, body):
+            return "hash_upgraded"
         return "unchanged"
 
     if not exists:
@@ -175,9 +208,16 @@ def migrate_document(doc: Document, chunks: list | None = None) -> str:
     if not stored_hash and body:
         stored_hash = content_hash(body)
 
-    if stored_hash and stored_hash == disk_hash:
-        return _mark_bound(doc, cleaned, stored_hash, chunks)
+    if stored_hash and hashes_equal(stored_hash, disk_hash):
+        # 旧 12 hex 对得上时，库里改存完整哈希，避免以后再按截断值去重。
+        return _mark_bound(doc, cleaned, disk_hash, chunks)
     # 库里没有正文、也没有哈希：没有另一份可保护的原文，采用当前文件。
     if not stored_hash and not body:
         return _mark_bound(doc, cleaned, disk_hash, chunks)
-    return _mark_diverged(doc, body, stored_hash or content_hash(body or cleaned), chunks)
+    digest = stored_hash
+    if body:
+        body_hash = content_hash(body)
+        # 保留的是库内正文。它的旧截断哈希能对上时，一并存完整值。
+        if not stored_hash or hashes_equal(stored_hash, body_hash):
+            digest = body_hash
+    return _mark_diverged(doc, body, digest or content_hash(body or cleaned), chunks)
