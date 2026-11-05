@@ -119,6 +119,43 @@ def test_same_path_reingest_replaces_vectors(tmp_path):
     assert manifest["doc_count"] == 1
 
 
+def test_same_path_reingest_keeps_created_at(tmp_path, monkeypatch):
+    """同 doc_id 再次入库：created_at 不变，updated_at 变。"""
+    import kbagent.ingestion.indexer as indexer_mod
+
+    stamps = iter(["2024-01-01T00:00:00+00:00", "2024-01-02T00:00:00+00:00"])
+
+    def fake_now() -> str:
+        try:
+            return next(stamps)
+        except StopIteration as exc:
+            raise AssertionError("indexer 调用 _utcnow 的次数超出预期") from exc
+
+    monkeypatch.setattr(indexer_mod, "_utcnow", fake_now)
+    kb = _kb(tmp_path)
+    try:
+        path = tmp_path / "note.md"
+        path.write_text("第一版正文，用来记下创建时间。", encoding="utf-8")
+        report = kb.ingest(path)
+        assert report.ok and report.added
+        doc_id = report.added[0]
+        before = kb.get_document(doc_id)
+        assert before is not None
+        assert before.created_at == "2024-01-01T00:00:00+00:00"
+        assert before.updated_at == "2024-01-01T00:00:00+00:00"
+
+        path.write_text("第二版正文已经完全不同。", encoding="utf-8")
+        report = kb.ingest(path)
+        assert report.ok and report.added == [doc_id]
+        after = kb.get_document(doc_id)
+        assert after is not None
+        assert after.created_at == before.created_at
+        assert after.updated_at == "2024-01-02T00:00:00+00:00"
+        assert after.content_hash != before.content_hash
+    finally:
+        kb.close()
+
+
 def test_same_path_vector_write_failure_keeps_old_vectors(tmp_path):
     kb = _kb(tmp_path)
     wrapper = _FailOnceAdd(kb._indexer.vector_store)

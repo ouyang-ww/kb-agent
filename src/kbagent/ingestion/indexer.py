@@ -46,6 +46,10 @@ from .source_text import locate_chunks, summarize
 logger = logging.getLogger(__name__)
 
 
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 @dataclass
 class IngestReport:
     added: list[str] = field(default_factory=list)
@@ -333,7 +337,7 @@ class Indexer:
         for i in range(0, len(texts), batch):
             embeddings.extend(self.embedder.embed_texts(texts[i : i + batch]))
 
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = _utcnow()
         # 绑定原件只留在文件系统。inline / orphaned_copy 才把正文写入应用库。
         stored_body = "" if source_kind == SOURCE_BOUND else cleaned
         doc = Document(

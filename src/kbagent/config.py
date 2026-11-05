@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     api_key: str = ""          # 兼容旧配置：等同 admin key
     api_read_key: str = ""     # 只读：search / ask / 文档读取
     api_admin_key: str = ""    # 管理：ingest / delete / flags / 审计
+    # 为 true 时，即使只监听回环地址也必须配置 Key，否则拒绝启动。
+    api_require_auth: bool = False
     # 单次上传上限（字节）。超过返回 413，并删除未写完的临时文件。
     max_upload_bytes: int = 20 * 1024 * 1024
     # 同时处理的上传数。多余请求排队，避免并发把磁盘打满。

@@ -38,7 +38,9 @@ def _make_client(
 
 def test_health(tmp_path):
     c = _make_client(tmp_path)
-    assert c.get("/v1/health").json() == {"status": "ok"}
+    body = c.get("/v1/health").json()
+    assert body["status"] == "ok"
+    assert body["vision"] == {"enabled": False, "available": False, "error": None}
 
 
 def test_ingest_text_and_get(tmp_path):
@@ -335,5 +337,213 @@ def test_responses_strip_absolute_source_path(tmp_path):
         exposed = TestClient(create_app(kb=kb, settings=exposed_settings))
         shown = exposed.get(f"/v1/documents/{doc_id}").json()
         assert shown["source_path"] == str(note)
+    finally:
+        kb.close()
+
+
+def test_loopback_names():
+    from kbagent.api.server import is_loopback_host
+
+    assert is_loopback_host("127.0.0.1")
+    assert is_loopback_host("localhost")
+    assert is_loopback_host("::1")
+    assert is_loopback_host("[::1]")
+    assert not is_loopback_host("0.0.0.0")
+    assert not is_loopback_host("::")
+    assert not is_loopback_host("192.168.1.10")
+
+
+def test_non_loopback_without_keys_refuses(tmp_path):
+    import pytest
+
+    from kbagent.errors import ConfigError
+    from kbagent.kb import KnowledgeBase
+
+    kb = KnowledgeBase(
+        Settings(
+            storage_dir=tmp_path / "kb",
+            embedding_model="unused",
+            rerank_enabled=False,
+            intent_enabled=False,
+            query_rewrite_enabled=False,
+            multimodal_enabled=False,
+            llm_api_key="test",
+            llm_base_url="http://localhost:9999/v1",
+        ),
+        embedder=FakeEmbedder(),
+        llm=FakeLLM(),
+    )
+    try:
+        with pytest.raises(ConfigError, match="拒绝"):
+            create_app(kb=kb, settings=kb.settings, bind_host="0.0.0.0")
+        public = kb.settings.model_copy(update={"api_host": "0.0.0.0"})
+        with pytest.raises(ConfigError, match="拒绝"):
+            create_app(kb=kb, settings=public)
+    finally:
+        kb.close()
+
+
+def test_loopback_without_keys_warns_and_serves(tmp_path, caplog):
+    import logging
+
+    from kbagent.kb import KnowledgeBase
+
+    kb = KnowledgeBase(
+        Settings(
+            storage_dir=tmp_path / "kb",
+            embedding_model="unused",
+            rerank_enabled=False,
+            intent_enabled=False,
+            query_rewrite_enabled=False,
+            multimodal_enabled=False,
+            llm_api_key="test",
+            llm_base_url="http://localhost:9999/v1",
+        ),
+        embedder=FakeEmbedder(),
+        llm=FakeLLM(),
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="kbagent.api.server"):
+            app = create_app(kb=kb, settings=kb.settings, bind_host="127.0.0.1")
+        assert any("鉴权已关闭" in record.getMessage() for record in caplog.records)
+        client = TestClient(app)
+        assert client.get("/v1/health").status_code == 200
+        assert client.post("/v1/ingest", json={"content": "本机开发"}).status_code == 200
+    finally:
+        kb.close()
+
+
+def test_require_auth_refuses_loopback_without_keys(tmp_path):
+    import pytest
+
+    from kbagent.errors import ConfigError
+    from kbagent.kb import KnowledgeBase
+
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=False,
+        api_require_auth=True,
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=FakeLLM())
+    try:
+        with pytest.raises(ConfigError, match="KB_API_REQUIRE_AUTH"):
+            create_app(kb=kb, settings=settings, bind_host="localhost")
+    finally:
+        kb.close()
+
+
+def test_non_loopback_with_key_requires_header(tmp_path):
+    from kbagent.kb import KnowledgeBase
+
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=False,
+        api_key="secret",
+        api_host="0.0.0.0",
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=FakeLLM())
+    try:
+        client = TestClient(create_app(kb=kb, settings=settings, bind_host="0.0.0.0"))
+        assert client.get("/v1/stats").status_code == 401
+        assert client.post("/v1/ingest", json={"content": "x"}).status_code == 401
+        assert (
+            client.get("/v1/stats", headers={"X-API-Key": "secret"}).status_code == 200
+        )
+    finally:
+        kb.close()
+
+
+def test_cli_serve_refuses_public_bind_without_keys(monkeypatch):
+    from typer.testing import CliRunner
+
+    from kbagent.cli import app as cli_app
+
+    for name in ("KB_API_KEY", "KB_API_READ_KEY", "KB_API_ADMIN_KEY", "KB_API_REQUIRE_AUTH"):
+        monkeypatch.delenv(name, raising=False)
+
+    def fail_create(*args, **kwargs):
+        raise AssertionError("无 Key 时不应启动对外服务")
+
+    monkeypatch.setattr("kbagent.api.server.create_app", fail_create)
+    result = CliRunner().invoke(cli_app, ["serve", "--host", "0.0.0.0", "--port", "9"])
+    assert result.exit_code != 0
+    assert "拒绝" in result.output
+
+
+def test_cli_serve_loopback_prints_warning(monkeypatch):
+    import uvicorn
+    from typer.testing import CliRunner
+
+    from kbagent.cli import app as cli_app
+
+    for name in ("KB_API_KEY", "KB_API_READ_KEY", "KB_API_ADMIN_KEY", "KB_API_REQUIRE_AUTH"):
+        monkeypatch.delenv(name, raising=False)
+    started: dict = {}
+
+    def fake_create_app(*args, **kwargs):
+        started["bind"] = kwargs.get("bind_host")
+        return "app"
+
+    monkeypatch.setattr("kbagent.api.server.create_app", fake_create_app)
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: started.setdefault("ran", True))
+    result = CliRunner().invoke(cli_app, ["serve", "--host", "127.0.0.1", "--port", "8711"])
+    assert result.exit_code == 0, result.output
+    assert "鉴权已关闭" in result.output
+    assert started["bind"] == "127.0.0.1"
+    assert started["ran"] is True
+
+
+def test_vision_init_failure_visible_in_health(tmp_path, caplog, monkeypatch):
+    import logging
+
+    from kbagent.kb import KnowledgeBase
+
+    class Boom:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("caption backend missing")
+
+    monkeypatch.setattr("kbagent.kb.VisionIndexer", Boom)
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=True,
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    with caplog.at_level(logging.WARNING, logger="kbagent.kb"):
+        kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=FakeLLM())
+    try:
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.WARNING and "VisionIndexer" in record.getMessage()
+        ]
+        assert warnings
+        assert warnings[0].exc_info is not None
+        assert "caption backend missing" in (kb.vision_status()["error"] or "")
+        client = TestClient(create_app(kb=kb, settings=settings))
+        health = client.get("/v1/health").json()
+        assert health["status"] == "degraded"
+        assert health["vision"]["enabled"] is True
+        assert health["vision"]["available"] is False
+        assert "caption backend missing" in health["vision"]["error"]
+        stats = client.get("/v1/stats").json()
+        assert stats["vision"]["available"] is False
+        assert "caption backend missing" in stats["vision"]["error"]
     finally:
         kb.close()

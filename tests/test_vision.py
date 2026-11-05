@@ -56,6 +56,30 @@ def test_vision_indexer_no_images(tmp_path):
     assert chunks == [] and media == []
 
 
+def test_enabled_vision_reports_available(tmp_path):
+    from kbagent.kb import KnowledgeBase
+
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=True,
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=FakeLLM())
+    try:
+        status = kb.vision_status()
+        assert status["enabled"] is True
+        assert status["available"] is True
+        assert status["error"] is None
+        assert kb.stats()["vision"] == status
+    finally:
+        kb.close()
+
+
 def test_ocr_disabled_returns_empty(tmp_path):
     ocr = OCREngine(enabled=False)
     assert ocr.ocr_text("/nonexistent.png") == ""

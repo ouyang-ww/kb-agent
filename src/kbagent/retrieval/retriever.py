@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from ..config import Settings
 from ..models import MediaRef, RetrievalHit
 from ..storage.filters import Where
-from ..vectorstore.base import VectorStore
+from ..vectorstore.base import VectorHit, VectorStore
+
+logger = logging.getLogger(__name__)
+
+# 第一窗沿用原来的 top_k*3。隐藏近邻占满这窗时再取到集合大小。
+_HIDDEN_WINDOW_FACTOR = 3
 
 
 def _meta_offset(meta: dict, key: str) -> int | None:
@@ -43,16 +49,13 @@ class Retriever:
     ) -> list[RetrievalHit]:
         collection = collection or self.settings.default_collection
         qv = self.embedder.embed_query(query)
-        fetch_k = top_k
-        if not include_hidden and self.doc_visibility is not None:
-            # 多取一些候选，过滤隐藏文档后再截断，降低召回损失
-            fetch_k = max(top_k * 3, top_k)
-        results = self.vector_store.query(collection, qv, fetch_k, where)
-        if not include_hidden and self.doc_visibility is not None:
-            results = [
-                r for r in results
-                if self.doc_visibility((r.metadata or {}).get("doc_id", ""))
-            ][:top_k]
+        # 可见性以文档行和治理元数据为准，不靠向量 metadata 的 scope/status。
+        # hide 不回写向量；若把 status 写进 where，再入库会把隐藏洗回可见。
+        # 近邻大量隐藏时，固定 top_k*3 会把后面的可见结果截掉，所以窗口会扩大。
+        if not include_hidden and self.doc_visibility is not None and top_k > 0:
+            results = self._query_visible(collection, qv, top_k, where)
+        else:
+            results = self.vector_store.query(collection, qv, top_k, where)
         hits: list[RetrievalHit] = []
         for r in results:
             meta: dict = r.metadata or {}
@@ -73,3 +76,100 @@ class Retriever:
                 )
             )
         return hits
+
+    def _is_visible_hit(self, hit: VectorHit) -> bool:
+        doc_id = (hit.metadata or {}).get("doc_id", "")
+        if not isinstance(doc_id, str):
+            doc_id = "" if doc_id is None else str(doc_id)
+        checker = self.doc_visibility
+        return checker is not None and checker(doc_id)
+
+    def _visible_only(self, results: list[VectorHit], top_k: int) -> list[VectorHit]:
+        kept: list[VectorHit] = []
+        for hit in results:
+            if self._is_visible_hit(hit):
+                kept.append(hit)
+                if len(kept) >= top_k:
+                    break
+        return kept
+
+    def _collection_size(self, collection: str) -> int | None:
+        counter = getattr(self.vector_store, "count", None)
+        if counter is None:
+            return None
+        try:
+            return max(0, int(counter(collection)))
+        except Exception:
+            logger.warning(
+                "无法读取集合 %s 的向量数量，检索窗口改为按返回条数扩大",
+                collection,
+                exc_info=True,
+            )
+            return None
+
+    def _query_visible(
+        self,
+        collection: str,
+        query_embedding: list[float],
+        top_k: int,
+        where: Where,
+    ) -> list[VectorHit]:
+        total = self._collection_size(collection)
+        if total == 0:
+            return []
+        window = max(top_k * _HIDDEN_WINDOW_FACTOR, top_k)
+        if total is not None:
+            window = min(window, total)
+        results = self.vector_store.query(collection, query_embedding, window, where)
+        visible = self._visible_only(results, top_k)
+        if len(visible) >= top_k or len(results) < window:
+            return visible
+        if total is not None:
+            if window >= total:
+                return visible
+            try:
+                results = self.vector_store.query(
+                    collection, query_embedding, total, where
+                )
+            except Exception:
+                logger.warning(
+                    "扩大检索窗口到集合大小失败，只返回当前可见结果",
+                    exc_info=True,
+                )
+                return visible
+            return self._visible_only(results, top_k)
+        return self._query_visible_until_full(
+            collection, query_embedding, top_k, where, window, results, visible
+        )
+
+    def _query_visible_until_full(
+        self,
+        collection: str,
+        query_embedding: list[float],
+        top_k: int,
+        where: Where,
+        window: int,
+        results: list[VectorHit],
+        visible: list[VectorHit],
+    ) -> list[VectorHit]:
+        """没有 count 时按 3 倍扩大，直到凑满、结果不再变多，或查询拒绝更大的 n。"""
+        seen = len(results)
+        while len(visible) < top_k:
+            nxt = window * _HIDDEN_WINDOW_FACTOR
+            if nxt <= window:
+                break
+            window = nxt
+            try:
+                results = self.vector_store.query(
+                    collection, query_embedding, window, where
+                )
+            except Exception:
+                logger.warning(
+                    "扩大检索窗口失败，只返回当前可见结果", exc_info=True
+                )
+                break
+            visible = self._visible_only(results, top_k)
+            if len(results) < window or len(results) <= seen:
+                break
+            seen = len(results)
+        return visible
