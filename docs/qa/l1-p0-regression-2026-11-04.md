@@ -25,6 +25,8 @@
 
 `doc_id` 由 `doc_id_for(source_path)` 计算（`src/kbagent/ingestion/loaders.py`）。仓库内 baseline 对应的身份字符串是 `examples/sample_notes/<文件名>`，不是绝对路径。
 
+上表 12 hex 是这次回归当时的主键。2026-11-05 起新 `doc_id` 为同一 SHA256 的完整 64 hex，当前 `eval/datasets/baseline.jsonl` 使用完整 id；这 12 hex 只是它们的前缀。见 `docs/status.md`「哈希迁移」。
+
 ### 1.2 临时库怎么造
 
 - **pytest**：每个用例 `tmp_path` 下的 `Settings(storage_dir=...)`，注入 `FakeEmbedder`。不读 `~/.kbagent`，不读 `.env`。

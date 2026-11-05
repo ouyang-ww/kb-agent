@@ -32,7 +32,15 @@ from ..vectorstore.base import StoredVector, VectorStore
 from .chunker import Chunker
 from .cleaner import Cleaner
 from .journal import IngestJournal, dump_document, dump_vector, load_document, load_vector
-from .loaders import content_hash, doc_id_for, load_file, scan_path
+from .loaders import (
+    LEGACY_HASH_HEX_LEN,
+    content_hash,
+    doc_id_for,
+    hashes_equal,
+    is_legacy_hash,
+    load_file,
+    scan_path,
+)
 from .source_text import locate_chunks, summarize
 
 logger = logging.getLogger(__name__)
@@ -59,6 +67,12 @@ def _source_kind(source_path: str, requested: str | None) -> str:
     if path:
         return SOURCE_ORPHANED
     return SOURCE_INLINE
+
+
+def _legacy_inline_id(collection: str, title: str, full_hash: str) -> str:
+    """旧 inline 身份把截断后的内容哈希拼进主键。"""
+    legacy_identity = f"{collection}:{title}:{full_hash[:LEGACY_HASH_HEX_LEN]}"
+    return doc_id_for(legacy_identity)[:LEGACY_HASH_HEX_LEN]
 
 
 def _scalarize(meta: dict) -> dict:
@@ -156,6 +170,50 @@ class Indexer:
         }
         return self._ingest_raw(raw, force=force)
 
+    def _adopt_legacy_doc(
+        self,
+        full_id: str,
+        source_path: str,
+        collection: str,
+        title: str,
+        full_hash: str,
+        cleaned: str,
+    ) -> Document | None:
+        """沿用旧的 12 hex doc_id。路径或全文对不上就放弃，避免截断碰撞覆盖别的文档。"""
+        if source_path:
+            row = self.doc_store.get(full_id[:LEGACY_HASH_HEX_LEN])
+            if row is None:
+                return None
+            if (row.source_path or "") != source_path:
+                logger.warning(
+                    "旧 doc_id %s 属于另一路径，新文档改用完整哈希",
+                    row.doc_id,
+                )
+                return None
+            return row
+        row = self.doc_store.get(_legacy_inline_id(collection, title, full_hash))
+        if row is None:
+            return None
+        if (row.source_path or "").strip():
+            return None
+        if row.collection != collection or row.title != title:
+            return None
+        if row.full_text:
+            if content_hash(row.full_text) != full_hash and row.full_text != cleaned:
+                logger.warning(
+                    "旧 doc_id %s 的全文与当前内容不一致，拒绝按截断 id 覆盖",
+                    row.doc_id,
+                )
+                return None
+            return row
+        if row.content_hash and not hashes_equal(row.content_hash, full_hash):
+            logger.warning(
+                "旧 doc_id %s 的 content_hash 与当前内容不一致，拒绝覆盖",
+                row.doc_id,
+            )
+            return None
+        return row
+
     # ---- 核心 ----
     def _ingest_raw(self, raw: dict, force: bool) -> str | None:
         collection = raw.get("collection") or self.settings.default_collection
@@ -184,15 +242,34 @@ class Indexer:
 
         # 同一 source_path 的 doc_id 稳定。先算出 id，再决定跳过还是替换，
         # 避免内容变更时直接 add：Chroma 对已有 id 不覆盖，chunk 变少会留下旧块。
+        # 新文档用完整 SHA256。旧库 doc_id 是同一哈希的前 12 hex，对得上才沿用，
+        # 避免把已入库文件再写成另一条，也避免截断碰撞时覆盖别人的文档。
         identity = source_path or f"{collection}:{title}:{h}"
         doc_id = doc_id_for(identity)
+        prior = self.doc_store.get(doc_id)
+        if prior is None:
+            legacy = self._adopt_legacy_doc(
+                doc_id, source_path, collection, title, h, cleaned
+            )
+            if legacy is not None:
+                prior = legacy
+                doc_id = legacy.doc_id
 
+        # 去重只认完整哈希。多行碰撞时 get_by_hash 返回 None，不能跳过。
         duplicate = self.doc_store.get_by_hash(h)
         if duplicate and not force:
-            return None  # 去重跳过
-        prior = self.doc_store.get(doc_id)
+            return None
         if prior and prior.content_hash == h and not force:
             return None
+        if (
+            prior
+            and is_legacy_hash(prior.content_hash)
+            and hashes_equal(prior.content_hash, h)
+        ):
+            logger.info(
+                "doc_id=%s 的 content_hash 仍是 12 hex，本次入库升级为完整 SHA256",
+                prior.doc_id,
+            )
 
         chunks = self.chunker.chunk(doc_id, cleaned, base_meta=_scalarize({
             **user_meta,

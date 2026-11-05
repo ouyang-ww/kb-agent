@@ -618,7 +618,7 @@ def test_api_bound_omits_body_and_migrate_is_admin_only(tmp_path):
         assert body["source_kind"] == SOURCE_BOUND
         assert body["full_text"] is None
         assert body["summary"]
-        assert body["source_path"].endswith("note.md")
+        assert body["source_path"] == ""
 
         inline = client.post(
             "/v1/ingest",
@@ -626,8 +626,13 @@ def test_api_bound_omits_body_and_migrate_is_admin_only(tmp_path):
             json={"content": "仅 API 正文", "title": "api"},
         )
         assert inline.status_code == 200
+        inline_id = inline.json()["doc_id"]
+        hidden_inline = client.get(f"/v1/documents/{inline_id}", headers=read).json()
+        assert hidden_inline["full_text"] is None
         inline_doc = client.get(
-            f"/v1/documents/{inline.json()['doc_id']}", headers=read
+            f"/v1/documents/{inline_id}",
+            headers=read,
+            params={"include_text": True},
         ).json()
         assert inline_doc["source_kind"] == SOURCE_INLINE
         assert "仅 API" in inline_doc["full_text"]
@@ -636,7 +641,9 @@ def test_api_bound_omits_body_and_migrate_is_admin_only(tmp_path):
         uploaded = client.post("/v1/ingest/file", headers=admin, files=files)
         assert uploaded.status_code == 200
         uploaded_doc = client.get(
-            f"/v1/documents/{uploaded.json()['doc_id']}", headers=read
+            f"/v1/documents/{uploaded.json()['doc_id']}",
+            headers=read,
+            params={"include_text": True},
         ).json()
         assert uploaded_doc["source_kind"] == SOURCE_INLINE
         assert "上传的正文" in uploaded_doc["full_text"]

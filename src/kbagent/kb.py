@@ -357,6 +357,7 @@ class KnowledgeBase:
             "orphaned_copy": 0,
             "diverged": 0,
             "unchanged": 0,
+            "hash_upgraded": 0,
         }
         with self._lock:
             for doc in self._doc_store.list():
@@ -372,6 +373,7 @@ class KnowledgeBase:
                 + report["inline"]
                 + report["orphaned_copy"]
                 + report["diverged"]
+                + report["hash_upgraded"]
             )
             if changed:
                 self.governance.record_audit(

@@ -30,6 +30,20 @@ class Settings(BaseSettings):
             raise ValueError("KB_VECTOR_METRIC 必须是 l2 / cosine / ip")
         return metric
 
+    @field_validator("max_upload_bytes")
+    @classmethod
+    def _check_upload_limit(cls, v: int) -> int:
+        if int(v) <= 0:
+            raise ValueError("KB_MAX_UPLOAD_BYTES 必须大于 0")
+        return int(v)
+
+    @field_validator("max_concurrent_uploads")
+    @classmethod
+    def _check_upload_concurrency(cls, v: int) -> int:
+        if int(v) <= 0:
+            raise ValueError("KB_MAX_CONCURRENT_UPLOADS 必须大于 0")
+        return int(v)
+
     # ---- 存储 ----
     storage_dir: Path = Path.home() / ".kbagent"
     default_collection: str = "personal"
@@ -102,6 +116,12 @@ class Settings(BaseSettings):
     api_key: str = ""          # 兼容旧配置：等同 admin key
     api_read_key: str = ""     # 只读：search / ask / 文档读取
     api_admin_key: str = ""    # 管理：ingest / delete / flags / 审计
+    # 单次上传上限（字节）。超过返回 413，并删除未写完的临时文件。
+    max_upload_bytes: int = 20 * 1024 * 1024
+    # 同时处理的上传数。多余请求排队，避免并发把磁盘打满。
+    max_concurrent_uploads: int = 4
+    # 对外 REST 是否带绝对 source_path / image_path。默认关，见 ADR 0002。
+    expose_source_paths: bool = False
     ui_port: int = 7860
 
     # ---- 派生路径 ----
