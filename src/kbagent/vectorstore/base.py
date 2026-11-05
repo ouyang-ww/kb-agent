@@ -21,6 +21,8 @@ class StoredVector:
     id: str
     document: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    # 仅在 get(..., include_embeddings=True) 时填充，供替换失败后回滚。
+    embedding: list[float] | None = None
 
 
 @dataclass
@@ -80,6 +82,8 @@ class VectorStore(Protocol):
         ids: list[str] | None = None,
         where: Where = None,
         limit: int | None = None,
+        *,
+        include_embeddings: bool = False,
     ) -> list[StoredVector]: ...
 
     def count(self, collection: str) -> int: ...
