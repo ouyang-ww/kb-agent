@@ -218,11 +218,17 @@ class KnowledgeBase:
 
     # ================= 治理 =================
     def _is_doc_visible(self, doc_id: str) -> bool:
+        """默认检索是否可见。文档行或治理元数据任一标为不可见就隐藏。
+
+        待清理如果只写成了文档行（治理更新失败），旧正文也不能再被 search 命中。
+        """
+        doc = self._doc_store.get(doc_id)
+        if doc is not None and doc.is_hidden:
+            return False
         meta = self.governance.get_meta(doc_id)
         if meta is not None:
             return is_visible(meta)
-        doc = self._doc_store.get(doc_id)
-        return bool(doc and not doc.is_hidden)
+        return doc is not None
 
     def get_doc_meta(self, doc_id: str) -> DocMeta | None:
         return self.governance.get_meta(doc_id)

@@ -566,30 +566,52 @@ class Indexer:
         return True
 
     def _quarantine(self, doc_id: str, replaced_by: str) -> None:
-        """删不掉的旧文档先从默认检索里拿掉，避免新旧正文一起被搜到。"""
+        """删不掉的旧文档先从默认检索里拿掉，避免新旧正文一起被搜到。
+
+        文档行和治理元数据都要标成 hidden。检索先看文档行，所以治理写入失败时
+        只要文档行隐藏成功，默认 search 就不再返回旧正文。两处都失败则抛错。
+        """
         doc = self.doc_store.get(doc_id)
-        if doc is not None and doc.status != "hidden":
+        if doc is None:
+            return
+        if doc.status != "hidden":
             doc.status = "hidden"
             try:
                 self.doc_store.upsert(doc)
             except Exception:
                 logger.warning("无法把待清理文档 %s 标为隐藏", doc_id, exc_info=True)
-        if self.governance is None:
+        stored = self.doc_store.get(doc_id)
+        row_hidden = stored is not None and stored.is_hidden
+
+        meta_hidden = False
+        if self.governance is not None:
+            try:
+                meta = self.governance.get_meta(doc_id) or DocMeta(doc_id=doc_id)
+                meta.status = "hidden"
+                self.governance.upsert_meta(meta)
+            except Exception:
+                logger.warning("无法把待清理文档 %s 的治理状态标为隐藏", doc_id, exc_info=True)
+            else:
+                try:
+                    self.governance.emit_event(
+                        doc_id, "pending_cleanup", {"replaced_by": replaced_by}
+                    )
+                    self.governance.record_audit(
+                        "document.pending_cleanup",
+                        doc_id,
+                        detail={"replaced_by": replaced_by},
+                    )
+                except Exception:
+                    logger.warning("无法记录文档 %s 的待清理事件", doc_id, exc_info=True)
+            try:
+                saved = self.governance.get_meta(doc_id)
+            except Exception:
+                saved = None
+            meta_hidden = saved is not None and saved.status == "hidden"
+
+        if row_hidden or meta_hidden:
             return
-        try:
-            meta = self.governance.get_meta(doc_id) or DocMeta(doc_id=doc_id)
-            meta.status = "hidden"
-            self.governance.upsert_meta(meta)
-            self.governance.emit_event(
-                doc_id, "pending_cleanup", {"replaced_by": replaced_by}
-            )
-            self.governance.record_audit(
-                "document.pending_cleanup",
-                doc_id,
-                detail={"replaced_by": replaced_by},
-            )
-        except Exception:
-            logger.warning("无法记录文档 %s 的待清理状态", doc_id, exc_info=True)
+        raise IngestError(f"未能隐藏待清理文档 {doc_id}")
 
     def _delete_superseded(self, old_id: str, collection: str, new_id: str) -> None:
         """新文档已经提交。删旧失败时重试一次，仍失败则标记待清理并报错。"""
@@ -606,7 +628,16 @@ class Indexer:
             collection,
             {"replaced_by": new_id},
         )
-        self._quarantine(old_id, new_id)
+        try:
+            self._quarantine(old_id, new_id)
+        except Exception as exc:
+            logger.error(
+                "新文档 %s 已提交，旧文档 %s 删除失败且未能隐藏", new_id, old_id
+            )
+            raise IngestError(
+                f"新文档 {new_id} 已提交，旧文档 {old_id} 删除失败，"
+                f"且未能从默认检索隐藏。已标记待清理。请运行 kb repair。原因: {exc}"
+            ) from exc
         logger.error(
             "新文档 %s 已提交，旧文档 %s 删除失败，已标记待清理", new_id, old_id
         )
@@ -662,12 +693,14 @@ class Indexer:
     def repair(self) -> dict[str, Any]:
         """重放未完成的写入日志，并清掉没有父文档的向量。
 
-        可重复执行。没有快照、又已经没有向量的文档只记在 ``vectorless`` 里，
-        调用方据此告警，不会假装已经修好。
+        可重复执行。活文档的哈希如果已经既不是日志里的旧版、也不是那次没写完的
+        新版，这条日志视为被后续写入取代，只删除日志、不恢复快照。
+        没有快照、又已经没有向量的文档只记在 ``vectorless`` 里，调用方据此告警。
         """
         report: dict[str, Any] = {
             "restored": [],
             "rolled_back": [],
+            "superseded": [],
             "orphans_removed": 0,
             "cleanups": [],
             "vectorless": [],
@@ -702,6 +735,7 @@ class Indexer:
         return bool(
             report["restored"]
             or report["rolled_back"]
+            or report["superseded"]
             or report["orphans_removed"]
             or report["cleanups"]
             or report["vectorless"]
@@ -739,6 +773,18 @@ class Indexer:
             self.journal.finish(entry.id)
             return
 
+        # 崩溃后如果又成功写过一版，活文档的哈希既不是日志里的旧版，也不是
+        # 这次没写完的新版。这时快照已经过期，只能丢掉日志，不能把旧向量盖回去。
+        if self._commit_superseded(current, prior_doc, new_doc):
+            logger.warning(
+                "跳过已被后续写入取代的修复日志 %s（doc_id=%s）",
+                entry.id,
+                new_doc.doc_id,
+            )
+            report["superseded"].append(new_doc.doc_id)
+            self.journal.finish(entry.id)
+            return
+
         if same_collection:
             self._restore_vectors(new_doc.collection, new_doc.doc_id, prior_vectors)
             if prior_doc is not None and prior_vectors:
@@ -763,6 +809,22 @@ class Indexer:
                 self.doc_store.delete(new_doc.doc_id)
         report["rolled_back"].append(new_doc.doc_id)
         self.journal.finish(entry.id)
+
+    @staticmethod
+    def _commit_superseded(
+        current: Document | None,
+        prior_doc: Document | None,
+        new_doc: Document,
+    ) -> bool:
+        """活文档已经不是这条日志的旧版或未完成新版。"""
+        if current is None:
+            # 有旧文档的日志不能把已经删掉的行复活；全新文档还要清掉半截向量。
+            return prior_doc is not None
+        if current.content_hash == new_doc.content_hash:
+            return False
+        if prior_doc is not None and current.content_hash == prior_doc.content_hash:
+            return False
+        return True
 
     def _repair_delete(self, entry, report: dict[str, Any]) -> None:
         doc_id = entry.doc_id

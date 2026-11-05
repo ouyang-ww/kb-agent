@@ -293,6 +293,133 @@ def test_crash_after_vector_delete_repair_restores_search(tmp_path, kb):
     assert any("ALPHA_TOKEN" in hit.text for hit in kb.search("ALPHA_TOKEN", top_k=5))
 
 
+def test_repair_after_reingest_does_not_clobber_new_content(tmp_path, kb):
+    """崩溃留下旧快照后，若又成功再入库，repair 只能丢掉过期日志。"""
+    path = tmp_path / "note.md"
+    path.write_text("ALPHA_TOKEN original facts.\n\nSecond old paragraph.", encoding="utf-8")
+    report = kb.ingest(path)
+    assert report.ok and report.added
+    doc_id = report.added[0]
+    original = kb.get_document(doc_id)
+    assert original is not None
+    original_hash = original.content_hash
+
+    wrapper = _CrashAfterDelete(kb._indexer.vector_store)
+    kb._indexer.vector_store = wrapper
+    wrapper.armed = True
+    path.write_text("BETA_TOKEN crashed attempt that must not stick.", encoding="utf-8")
+    with pytest.raises(_CrashWindow):
+        kb.ingest(path)
+    assert kb.get_document(doc_id).content_hash == original_hash
+    assert _vectors(kb, doc_id) == []
+
+    wrapper.armed = False
+    path.write_text("GAMMA_TOKEN newest facts stay after repair.", encoding="utf-8")
+    again = kb.ingest(path)
+    assert again.ok
+    assert again.added == [doc_id]
+    newest = kb.get_document(doc_id)
+    assert newest is not None
+    assert newest.content_hash not in {original_hash, ""}
+
+    repaired = kb.repair()
+    assert repaired["errors"] == []
+    assert doc_id in repaired["superseded"]
+    assert doc_id not in repaired["restored"]
+    assert doc_id not in repaired["rolled_back"]
+
+    kept = kb.get_document(doc_id)
+    assert kept is not None
+    assert kept.content_hash == newest.content_hash
+    rows = _vectors(kb, doc_id)
+    blob = "\n".join(row.document for row in rows)
+    assert "GAMMA_TOKEN" in blob
+    assert "ALPHA_TOKEN" not in blob
+    assert "BETA_TOKEN" not in blob
+    hits = kb.search("GAMMA_TOKEN", top_k=5)
+    assert any("GAMMA_TOKEN" in hit.text for hit in hits)
+    assert all("ALPHA_TOKEN" not in hit.text for hit in hits)
+    assert all("BETA_TOKEN" not in hit.text for hit in hits)
+
+    follow = kb.repair()
+    assert follow["superseded"] == []
+    assert follow["restored"] == []
+    assert follow["rolled_back"] == []
+    rows = _vectors(kb, doc_id)
+    assert "GAMMA_TOKEN" in "\n".join(row.document for row in rows)
+
+
+def test_quarantine_hides_when_governance_update_fails(kb):
+    doc_id = kb.ingest_text("旧内容 UNIQUE_OLD", title="笔记")
+    assert doc_id
+    original = kb.governance.upsert_meta
+
+    def boom(meta):
+        if meta.doc_id == doc_id and meta.status == "hidden":
+            raise RuntimeError("injected meta failure")
+        return original(meta)
+
+    kb.governance.upsert_meta = boom
+    kb._indexer.doc_store = _FailDocDelete(kb._indexer.doc_store, times=5)
+    with pytest.raises(IngestError, match="待清理"):
+        kb.update_document(doc_id, "新内容 UNIQUE_NEW")
+
+    meta = kb.governance.get_meta(doc_id)
+    assert meta is not None
+    assert meta.status == "active"
+    hidden = kb.get_document(doc_id, include_hidden=True)
+    assert hidden is not None
+    assert hidden.status == "hidden"
+    assert kb.get_document(doc_id) is None
+    assert all("UNIQUE_OLD" not in hit.text for hit in kb.search("UNIQUE_OLD", top_k=5))
+    assert any("UNIQUE_NEW" in hit.text for hit in kb.search("UNIQUE_NEW", top_k=5))
+
+
+def test_quarantine_fails_loudly_when_hide_does_not_land(kb):
+    doc_id = kb.ingest_text("旧内容 STILL_OLD", title="笔记")
+    assert doc_id
+    original_meta = kb.governance.upsert_meta
+
+    def boom_meta(meta):
+        if meta.doc_id == doc_id and meta.status == "hidden":
+            raise RuntimeError("injected meta failure")
+        return original_meta(meta)
+
+    class _FailHide:
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        def upsert(self, doc):
+            if doc.doc_id == doc_id and doc.status == "hidden":
+                raise RuntimeError("injected row hide failure")
+            return self._inner.upsert(doc)
+
+        def delete(self, target: str) -> bool:
+            raise RuntimeError("injected doc delete failure")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    kb.governance.upsert_meta = boom_meta
+    kb._indexer.doc_store = _FailHide(kb._indexer.doc_store)
+    with pytest.raises(IngestError, match="未能从默认检索隐藏"):
+        kb.update_document(doc_id, "新内容 STILL_NEW")
+
+    assert kb.governance.get_meta(doc_id).status == "active"
+    visible = kb.get_document(doc_id, include_hidden=True)
+    assert visible is not None
+    assert visible.status == "active"
+    assert any("STILL_OLD" in hit.text for hit in kb.search("STILL_OLD", top_k=5))
+
+    kb.governance.upsert_meta = original_meta
+    kb._indexer.doc_store = kb._doc_store
+    repaired = kb.repair()
+    assert doc_id in repaired["cleanups"]
+    assert kb.get_document(doc_id, include_hidden=True) is None
+    assert all("STILL_OLD" not in hit.text for hit in kb.search("STILL_OLD", top_k=5))
+    assert any("STILL_NEW" in hit.text for hit in kb.search("STILL_NEW", top_k=5))
+
+
 def test_update_old_delete_failure_hides_duplicate_until_repair(kb):
     doc_id = kb.ingest_text("旧内容 UNIQUE_OLD", title="笔记")
     assert doc_id
