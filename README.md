@@ -66,6 +66,7 @@ kb hide <doc_id> / kb unhide <doc_id>      # 隐藏 / 恢复文档
 kb events                                  # 治理事件
 kb answer-log / kb audit-log               # 答案日志 / 审计日志
 kb governance backfill                     # 旧文档 docs_meta 回填
+kb repair                                  # 对账向量与文档：恢复中断写入、清理孤儿向量
 ```
 
 ## 架构与数据流

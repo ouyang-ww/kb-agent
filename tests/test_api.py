@@ -106,6 +106,25 @@ def test_auth_required(tmp_path):
     assert c.get("/v1/stats", headers={"X-API-Key": "secret"}).status_code == 200
 
 
+def test_unequal_length_api_key_is_rejected(tmp_path):
+    """更短或更长的 Key 必须是 401，不能因为比较函数抛错变成 500。"""
+    from kbagent.api.server import _key_matches
+
+    assert _key_matches("sec", "secret") is False
+    assert _key_matches("secret-extra", "secret") is False
+    assert _key_matches("密" * len("secret"), "secret") is False
+    assert _key_matches("secret", "secret") is True
+
+    c = _make_client(tmp_path, api_key="secret")
+    assert c.get("/v1/stats", headers={"X-API-Key": "sec"}).status_code == 401
+    assert c.get("/v1/stats", headers={"X-API-Key": "secret-extra"}).status_code == 401
+    assert (
+        c.post("/v1/ingest", json={"content": "x"}, headers={"X-API-Key": "s"}).status_code
+        == 401
+    )
+    assert c.get("/v1/stats", headers={"X-API-Key": "secret"}).status_code == 200
+
+
 def test_runtime_flags_api(tmp_path):
     c = _make_client(tmp_path)
     r = c.get("/v1/settings/flags")

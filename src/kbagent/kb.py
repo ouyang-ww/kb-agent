@@ -218,11 +218,17 @@ class KnowledgeBase:
 
     # ================= 治理 =================
     def _is_doc_visible(self, doc_id: str) -> bool:
+        """默认检索是否可见。文档行或治理元数据任一标为不可见就隐藏。
+
+        待清理如果只写成了文档行（治理更新失败），旧正文也不能再被 search 命中。
+        """
+        doc = self._doc_store.get(doc_id)
+        if doc is not None and doc.is_hidden:
+            return False
         meta = self.governance.get_meta(doc_id)
         if meta is not None:
             return is_visible(meta)
-        doc = self._doc_store.get(doc_id)
-        return bool(doc and not doc.is_hidden)
+        return doc is not None
 
     def get_doc_meta(self, doc_id: str) -> DocMeta | None:
         return self.governance.get_meta(doc_id)
@@ -267,6 +273,16 @@ class KnowledgeBase:
 
     def stats(self) -> dict[str, Any]:
         return self._indexer.stats()
+
+    def repair(self) -> dict[str, Any]:
+        """对账向量库与文档库，可重复执行。
+
+        未完成的替换回到写入前的文档；没有父文档的向量会被删除；
+        已标记待清理的旧文档会被删掉。没有快照的缺向量文档记在
+        ``vectorless`` 中，便于告警。
+        """
+        with self._lock:
+            return self._indexer.repair()
 
     def collections(self) -> list[str]:
         return self._vector_store.collections()
@@ -379,13 +395,13 @@ class KnowledgeBase:
 
         q = query.strip()
         if rewrite_on:
-            saved = self.settings.query_rewrite_enabled
-            self.settings.query_rewrite_enabled = True
-            try:
-                plan = self._query_processor.process(q)
-                q = plan.rewritten_query
-            finally:
-                self.settings.query_rewrite_enabled = saved
+            # 开关只作为这次调用的参数，不改共享 Settings，避免和 ask 并发时互相覆盖。
+            plan = self._query_processor.process(
+                q,
+                rewrite_enabled=True,
+                intent_enabled=self.settings.intent_enabled,
+            )
+            q = plan.rewritten_query
 
         candidates_n = self.settings.rerank_candidates if rerank_on else top_k
         hits = self._retriever.search(
@@ -458,6 +474,7 @@ class KnowledgeBase:
         )
 
     def close(self) -> None:
+        self._indexer.close()
         self.flags.close()
         self.governance.close()
         self._doc_store.close()

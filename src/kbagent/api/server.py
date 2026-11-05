@@ -29,6 +29,16 @@ from .schemas import (
     StatsOut,
 )
 
+def _key_matches(supplied: str, expected: str) -> bool:
+    """比较 API Key。长度不同或含非 ASCII 时拒绝，避免鉴权抛错变成 500。"""
+    if not supplied or not expected or len(supplied) != len(expected):
+        return False
+    try:
+        return hmac.compare_digest(supplied, expected)
+    except (TypeError, ValueError):
+        return False
+
+
 def _media_out(m: MediaRef | None) -> MediaOut | None:
     if m is None:
         return None
@@ -93,7 +103,7 @@ def create_app(kb: KnowledgeBase | None = None, settings: Settings | None = None
             return
         supplied = request.headers.get("X-API-Key", "")
         candidates = (admin_key,) if admin_required else (read_key, admin_key)
-        if not any(k and hmac.compare_digest(supplied, k) for k in candidates):
+        if not any(_key_matches(supplied, k) for k in candidates):
             raise HTTPException(status_code=401, detail="无效的 API Key")
 
     def auth_read(request: Request) -> None:

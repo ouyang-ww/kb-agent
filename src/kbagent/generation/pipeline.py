@@ -56,14 +56,12 @@ class RAGPipeline:
         rewrite_on = self.settings.query_rewrite_enabled if rewrite is None else rewrite
         intent_on = self.settings.intent_enabled if intent is None else intent
 
-        # 意图识别 + 改写（临时覆盖开关，避免并发互相干扰）
-        saved = (self.settings.query_rewrite_enabled, self.settings.intent_enabled)
-        self.settings.query_rewrite_enabled = rewrite_on
-        self.settings.intent_enabled = intent_on
-        try:
-            plan = self.query_processor.process(query)
-        finally:
-            self.settings.query_rewrite_enabled, self.settings.intent_enabled = saved
+        # 本次请求的开关作为参数传入，不改共享 Settings。
+        plan = self.query_processor.process(
+            query,
+            intent_enabled=intent_on,
+            rewrite_enabled=rewrite_on,
+        )
 
         meta: dict[str, Any] = {
             "intent": plan.intent,

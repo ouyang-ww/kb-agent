@@ -1,7 +1,10 @@
 """RAG pipeline 测试：全流程、意图路由、无结果不臆造、来源编号。"""
 
+import threading
+
 from kbagent.config import Settings
 from kbagent.kb import KnowledgeBase
+from kbagent.models import QueryPlan
 
 from helpers import FakeEmbedder, FakeLLM
 
@@ -62,6 +65,73 @@ def test_ask_sources_carried(settings):
     ans = kb.ask("什么是 RAG？", top_k=2)
     assert ans.sources[0].doc_id == doc_id
     assert ans.sources[0].title == "RAG"
+
+
+def test_search_and_ask_do_not_clobber_shared_flags(kb):
+    """search/ask 的本次开关不能写进共享 Settings，并发时也不能留脏值。"""
+    kb.settings.query_rewrite_enabled = False
+    kb.settings.intent_enabled = True
+    search_entered = threading.Event()
+    ask_entered = threading.Event()
+    search_release = threading.Event()
+    ask_release = threading.Event()
+    seen: dict[str, tuple] = {}
+
+    def fake_process(query, intent_enabled=None, rewrite_enabled=None):
+        seen[query] = (rewrite_enabled, intent_enabled)
+        if query == "SEARCH":
+            search_entered.set()
+            assert search_release.wait(timeout=3)
+        elif query == "ASK":
+            ask_entered.set()
+            assert ask_release.wait(timeout=3)
+        return QueryPlan("kb_question", query, query)
+
+    kb._query_processor.process = fake_process
+    t_search = threading.Thread(target=lambda: kb.search("SEARCH", rewrite=True))
+    t_ask = threading.Thread(
+        target=lambda: kb.ask("ASK", rewrite=False, intent=False)
+    )
+    ask_started = False
+    try:
+        t_search.start()
+        assert search_entered.wait(timeout=3)
+        during_search = (
+            kb.settings.query_rewrite_enabled,
+            kb.settings.intent_enabled,
+        )
+        t_ask.start()
+        ask_started = True
+        assert ask_entered.wait(timeout=3)
+        during_both = (
+            kb.settings.query_rewrite_enabled,
+            kb.settings.intent_enabled,
+        )
+        # 先放行 search，让它的收尾发生在 ask 仍停在 process 里的时候。
+        search_release.set()
+        t_search.join(timeout=3)
+        after_search = (
+            kb.settings.query_rewrite_enabled,
+            kb.settings.intent_enabled,
+        )
+        ask_release.set()
+        t_ask.join(timeout=3)
+    finally:
+        search_release.set()
+        ask_release.set()
+        t_search.join(timeout=3)
+        if ask_started:
+            t_ask.join(timeout=3)
+
+    assert during_search == (False, True)
+    assert during_both == (False, True)
+    assert after_search == (False, True)
+    assert (kb.settings.query_rewrite_enabled, kb.settings.intent_enabled) == (
+        False,
+        True,
+    )
+    assert seen["SEARCH"] == (True, True)
+    assert seen["ASK"] == (False, False)
 
 
 def test_ask_rewrite_used_for_retrieval(settings):
