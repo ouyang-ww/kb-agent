@@ -258,6 +258,20 @@ def stats():
     typer.echo(json.dumps(s, ensure_ascii=False, indent=2))
 
 
+@app.command()
+def repair():
+    """对账文档库与向量库。
+
+    恢复未写完的替换（旧文档仍可检索）、清理没有父文档的向量，
+    并删除已标记待清理的旧文档。可重复执行。
+    """
+    kb = _kb()
+    report = kb.repair()
+    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    if report.get("errors") or report.get("vectorless"):
+        raise typer.Exit(1)
+
+
 # ================= 运行时开关 =================
 @config_app.command("get")
 def config_get(name: Optional[str] = typer.Argument(None)):

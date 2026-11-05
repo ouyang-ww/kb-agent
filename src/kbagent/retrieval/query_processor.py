@@ -28,10 +28,18 @@ class QueryProcessor:
         self.llm = llm
         self.settings = settings
 
-    def process(self, query: str) -> QueryPlan:
+    def process(
+        self,
+        query: str,
+        *,
+        intent_enabled: bool | None = None,
+        rewrite_enabled: bool | None = None,
+    ) -> QueryPlan:
         query = query.strip()
-        intent_enabled = self.settings.intent_enabled
-        rewrite_enabled = self.settings.query_rewrite_enabled
+        if intent_enabled is None:
+            intent_enabled = self.settings.intent_enabled
+        if rewrite_enabled is None:
+            rewrite_enabled = self.settings.query_rewrite_enabled
         if not intent_enabled and not rewrite_enabled:
             return QueryPlan(intent="kb_question", rewritten_query=query, original_query=query)
         try:

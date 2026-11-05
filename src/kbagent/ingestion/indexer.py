@@ -3,10 +3,13 @@
 绑定源文件时 SQLite 不保存整篇正文。
 
 含内容哈希去重、update/delete 级联清理、统计与报告。
+向量库与 SQLite 无法同一事务提交：破坏性写入前先落修复日志，失败则补偿，
+进程中断后用 ``repair`` 恢复。
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,8 +31,11 @@ from ..storage.filters import eq
 from ..vectorstore.base import StoredVector, VectorStore
 from .chunker import Chunker
 from .cleaner import Cleaner
+from .journal import IngestJournal, dump_document, dump_vector, load_document, load_vector
 from .loaders import content_hash, doc_id_for, load_file, scan_path
 from .source_text import locate_chunks, summarize
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -93,6 +99,8 @@ class Indexer:
         self.governance = governance
         self.chunker = Chunker(settings.chunk_size, settings.chunk_overlap)
         self.cleaner = Cleaner()
+        # 与文档库同一文件、独立连接。删除/替换向量之前先提交一行日志。
+        self.journal = IngestJournal(settings.documents_db)
 
     # ---- 入口 ----
     def ingest_path(
@@ -285,7 +293,7 @@ class Indexer:
 
         # 相同内容强制写入到另一个 doc_id：新文档成功后再删旧副本。
         if duplicate and force and duplicate.doc_id != doc_id:
-            self.delete_document(duplicate.doc_id, duplicate.collection)
+            self._delete_superseded(duplicate.doc_id, duplicate.collection, doc_id)
         return doc_id
 
     def _commit_ingest(
@@ -305,13 +313,28 @@ class Indexer:
         """写入向量和父文档。同 doc_id 先删旧向量再 add；失败则回滚。
 
         Chroma 的 add 遇到已有 id 不会覆盖，chunk 变少时高序号也会残留，
-        所以替换必须按 doc_id 清掉旧向量。清掉之后如果 add / SQLite / 治理失败，
-        用快照把旧向量和旧父文档写回去。
+        所以替换必须按 doc_id 清掉旧向量。清掉之前把旧向量快照写入修复日志，
+        这样进程在删除和写入之间退出后，``repair`` 仍能把旧文档检索回来。
+        异常路径用内存快照立即回滚；回滚自己也失败时留下日志，交给 ``repair``。
         """
         collection = doc.collection
         replacing = prior is not None
-        same_collection = replacing and prior.collection == collection
+        same_collection = prior is not None and prior.collection == collection
         snapshot: list[StoredVector] = []
+        if replacing and prior is not None:
+            snapshot = self._snapshot_vectors(prior.collection, doc.doc_id)
+        journal_id = self.journal.begin(
+            "commit",
+            doc.doc_id,
+            collection,
+            {
+                "new_doc": dump_document(doc),
+                "prior_doc": dump_document(prior) if prior else None,
+                "prior_vectors": [dump_vector(row) for row in snapshot],
+                "new_ids": list(ids),
+                "same_collection": same_collection,
+            },
+        )
         deleted_old = False
         wrote_new_vectors = False
         wrote_sqlite = False
@@ -321,17 +344,14 @@ class Indexer:
             prior_meta = self.governance.get_meta(doc.doc_id)
 
         try:
-            if same_collection:
-                snapshot = self._snapshot_vectors(collection, doc.doc_id)
-                if snapshot:
-                    # 同 doc_id 替换：先删光该文档的向量，再写入新 chunk。
-                    self.vector_store.delete(collection, where=eq("doc_id", doc.doc_id))
-                    deleted_old = True
-                self.vector_store.add(collection, ids, embeddings, texts, metas)
-                wrote_new_vectors = True
-            else:
-                self.vector_store.add(collection, ids, embeddings, texts, metas)
-                wrote_new_vectors = True
+            if same_collection and snapshot:
+                # 同 doc_id 替换：先删光该文档的向量，再写入新 chunk。
+                # 标记放在删除之前，删除抛错时也按「旧向量可能已经不在」回滚。
+                deleted_old = True
+                self.vector_store.delete(collection, where=eq("doc_id", doc.doc_id))
+            # 标记放在 add 之前，写入中途失败时回滚会清掉半截向量。
+            wrote_new_vectors = True
+            self.vector_store.add(collection, ids, embeddings, texts, metas)
 
             self.doc_store.upsert(doc)
             wrote_sqlite = True
@@ -358,7 +378,7 @@ class Indexer:
                         self.settings.embedding_manifest, 1
                     )
 
-            if replacing and not same_collection:
+            if replacing and not same_collection and prior is not None:
                 self.vector_store.delete(
                     prior.collection, where=eq("doc_id", doc.doc_id)
                 )
@@ -376,10 +396,17 @@ class Indexer:
                     prior_meta=prior_meta,
                 )
             except Exception as rollback_exc:
+                logger.error(
+                    "入库失败且无法恢复文档 %s，已保留修复日志: %s",
+                    doc.doc_id,
+                    rollback_exc,
+                )
                 raise IngestError(
-                    f"入库失败且无法恢复旧文档: {rollback_exc}"
+                    f"入库失败且无法恢复旧文档，请运行 kb repair: {rollback_exc}"
                 ) from exc
+            self._safe_finish(journal_id)
             raise
+        self._safe_finish(journal_id)
 
     def _snapshot_vectors(self, collection: str, doc_id: str) -> list[StoredVector]:
         return self.vector_store.get(
@@ -429,6 +456,13 @@ class Indexer:
             self._restore_vectors(collection, doc.doc_id, snapshot)
         elif wrote_new_vectors:
             self.vector_store.delete(collection, where=eq("doc_id", doc.doc_id))
+            # 换了集合时，旧向量在收尾阶段才删。失败时按快照放回旧集合。
+            if (
+                prior is not None
+                and snapshot
+                and prior.collection != collection
+            ):
+                self._restore_vectors(prior.collection, prior.doc_id, snapshot)
 
         if wrote_sqlite:
             if prior is not None:
@@ -452,14 +486,17 @@ class Indexer:
         else:
             self.governance.mark_deleted(doc.doc_id)
 
-    # ---- 管理 ----
-    def delete_document(self, doc_id: str, collection: str | None = None) -> bool:
-        doc = self.doc_store.get(doc_id)
-        if not doc:
-            return False
-        coll = collection or doc.collection
-        self.vector_store.delete(coll, where=eq("doc_id", doc_id))
-        self.doc_store.delete(doc_id)
+    def _safe_finish(self, journal_id: int | None) -> None:
+        if journal_id is None:
+            return
+        try:
+            self.journal.finish(journal_id)
+        except Exception:
+            logger.error(
+                "修复日志 %s 未能关闭，请运行 kb repair", journal_id, exc_info=True
+            )
+
+    def _finalize_delete(self, doc_id: str) -> None:
         if self.governance is not None:
             self.governance.mark_deleted(doc_id)
             self.governance.emit_event(doc_id, "delete")
@@ -469,7 +506,114 @@ class Indexer:
         media_dir = self.settings.media_root / doc_id
         if media_dir.exists():
             shutil.rmtree(media_dir, ignore_errors=True)
+
+    def _compensate_delete(
+        self,
+        doc_id: str,
+        collection: str,
+        snapshot: list[StoredVector],
+        journal_id: int,
+        exc: Exception,
+    ) -> None:
+        """删除中途失败：文档还在就把向量放回去；文档行已经没了就不要把向量写回。"""
+        try:
+            still_there = self.doc_store.get(doc_id) is not None
+        except Exception:
+            still_there = True
+        try:
+            if still_there:
+                self._restore_vectors(collection, doc_id, snapshot)
+                logger.warning("删除文档 %s 失败，已恢复向量: %s", doc_id, exc)
+            else:
+                self.vector_store.delete(collection, where=eq("doc_id", doc_id))
+                self._finalize_delete(doc_id)
+                logger.warning(
+                    "删除文档 %s 的收尾失败，文档行已不在: %s", doc_id, exc
+                )
+            self._safe_finish(journal_id)
+        except Exception as rollback_exc:
+            logger.error(
+                "删除文档 %s 失败且无法恢复向量，已保留修复日志: %s",
+                doc_id,
+                rollback_exc,
+            )
+            raise IngestError(
+                f"删除文档 {doc_id} 失败且无法恢复向量，请运行 kb repair: {rollback_exc}"
+            ) from exc
+
+    # ---- 管理 ----
+    def delete_document(self, doc_id: str, collection: str | None = None) -> bool:
+        doc = self.doc_store.get(doc_id)
+        if not doc:
+            return False
+        coll = collection or doc.collection
+        snapshot = self._snapshot_vectors(coll, doc_id)
+        journal_id = self.journal.begin(
+            "delete",
+            doc_id,
+            coll,
+            {"snapshot": [dump_vector(row) for row in snapshot]},
+        )
+        try:
+            # 标记语义放在调用前：删除抛错时也尝试按快照恢复。
+            self.vector_store.delete(coll, where=eq("doc_id", doc_id))
+            self.doc_store.delete(doc_id)
+            self._finalize_delete(doc_id)
+        except Exception as exc:
+            self._compensate_delete(doc_id, coll, snapshot, journal_id, exc)
+            raise
+        self._safe_finish(journal_id)
         return True
+
+    def _quarantine(self, doc_id: str, replaced_by: str) -> None:
+        """删不掉的旧文档先从默认检索里拿掉，避免新旧正文一起被搜到。"""
+        doc = self.doc_store.get(doc_id)
+        if doc is not None and doc.status != "hidden":
+            doc.status = "hidden"
+            try:
+                self.doc_store.upsert(doc)
+            except Exception:
+                logger.warning("无法把待清理文档 %s 标为隐藏", doc_id, exc_info=True)
+        if self.governance is None:
+            return
+        try:
+            meta = self.governance.get_meta(doc_id) or DocMeta(doc_id=doc_id)
+            meta.status = "hidden"
+            self.governance.upsert_meta(meta)
+            self.governance.emit_event(
+                doc_id, "pending_cleanup", {"replaced_by": replaced_by}
+            )
+            self.governance.record_audit(
+                "document.pending_cleanup",
+                doc_id,
+                detail={"replaced_by": replaced_by},
+            )
+        except Exception:
+            logger.warning("无法记录文档 %s 的待清理状态", doc_id, exc_info=True)
+
+    def _delete_superseded(self, old_id: str, collection: str, new_id: str) -> None:
+        """新文档已经提交。删旧失败时重试一次，仍失败则标记待清理并报错。"""
+        last: Exception | None = None
+        for _ in range(2):
+            try:
+                self.delete_document(old_id, collection)
+                return
+            except Exception as exc:
+                last = exc
+        self.journal.begin(
+            "cleanup",
+            old_id,
+            collection,
+            {"replaced_by": new_id},
+        )
+        self._quarantine(old_id, new_id)
+        logger.error(
+            "新文档 %s 已提交，旧文档 %s 删除失败，已标记待清理", new_id, old_id
+        )
+        raise IngestError(
+            f"新文档 {new_id} 已提交，旧文档 {old_id} 删除失败，已标记待清理。"
+            f"请运行 kb repair。原因: {last}"
+        ) from last
 
     def update_document(self, doc_id: str, new_content: str, **kwargs) -> str | None:
         """用新内容替换文档。先入库，成功后再删除被换掉的旧 doc_id。
@@ -477,7 +621,7 @@ class Indexer:
         未显式重新绑定路径时，新正文是 inline，不继承旧的源文件路径；
         内容变化会得到新 doc_id，此时才删除旧文档。同一路径原地替换时
         doc_id 不变，由入库路径按该 id 换向量。清洗、嵌入或向量写入失败
-        时不删除，旧文档仍可读取、仍可检索。
+        时不删除，旧文档仍可读取、仍可检索。删旧失败不会静默留下可检索的双份。
         """
         doc = self.doc_store.get(doc_id)
         if not doc:
@@ -494,7 +638,7 @@ class Indexer:
         if not new_id or new_id == doc_id:
             # 内容未变，或已按同一 doc_id 原地替换。不要再 delete。
             return doc_id
-        self.delete_document(doc_id, doc.collection)
+        self._delete_superseded(doc_id, doc.collection, new_id)
         return new_id
 
     def list_documents(self, collection: str | None = None) -> list[Document]:
@@ -510,3 +654,193 @@ class Indexer:
             c: self.vector_store.count(c) for c in s["collections"]
         }
         return s
+
+    def close(self) -> None:
+        self.journal.close()
+
+    # ---- 修复 ----
+    def repair(self) -> dict[str, Any]:
+        """重放未完成的写入日志，并清掉没有父文档的向量。
+
+        可重复执行。没有快照、又已经没有向量的文档只记在 ``vectorless`` 里，
+        调用方据此告警，不会假装已经修好。
+        """
+        report: dict[str, Any] = {
+            "restored": [],
+            "rolled_back": [],
+            "orphans_removed": 0,
+            "cleanups": [],
+            "vectorless": [],
+            "errors": [],
+        }
+        for entry in self.journal.pending():
+            try:
+                if entry.op == "commit":
+                    self._repair_commit(entry, report)
+                elif entry.op == "delete":
+                    self._repair_delete(entry, report)
+                elif entry.op == "cleanup":
+                    self._repair_cleanup(entry, report)
+                else:
+                    report["errors"].append(
+                        {"id": entry.id, "error": f"未知日志: {entry.op}"}
+                    )
+            except Exception as exc:
+                logger.exception("修复日志 %s 失败", entry.id)
+                report["errors"].append({"id": entry.id, "error": str(exc)})
+        report["orphans_removed"] += self._gc_orphan_vectors()
+        self._note_vectorless(report)
+        if self.governance is not None and self._repair_dirty(report):
+            try:
+                self.governance.record_audit("repair", detail=report)
+            except Exception:
+                logger.warning("修复结果未能写入审计日志", exc_info=True)
+        return report
+
+    @staticmethod
+    def _repair_dirty(report: dict[str, Any]) -> bool:
+        return bool(
+            report["restored"]
+            or report["rolled_back"]
+            or report["orphans_removed"]
+            or report["cleanups"]
+            or report["vectorless"]
+            or report["errors"]
+        )
+
+    def _ids_present(self, collection: str, ids: list[str]) -> bool:
+        if not ids:
+            return False
+        rows = self.vector_store.get(collection, ids=ids)
+        return {row.id for row in rows} >= set(ids)
+
+    def _repair_commit(self, entry, report: dict[str, Any]) -> None:
+        payload = entry.payload
+        new_doc = load_document(payload["new_doc"])
+        prior_raw = payload.get("prior_doc")
+        prior_doc = load_document(prior_raw) if isinstance(prior_raw, dict) else None
+        prior_vectors = [
+            load_vector(item)
+            for item in (payload.get("prior_vectors") or [])
+            if isinstance(item, dict)
+        ]
+        new_ids = [str(item) for item in (payload.get("new_ids") or [])]
+        same_collection = bool(payload.get("same_collection"))
+        current = self.doc_store.get(new_doc.doc_id)
+        sqlite_ok = (
+            current is not None and current.content_hash == new_doc.content_hash
+        )
+        vectors_ok = self._ids_present(new_doc.collection, new_ids)
+        if sqlite_ok and vectors_ok:
+            if prior_doc is not None and prior_doc.collection != new_doc.collection:
+                self.vector_store.delete(
+                    prior_doc.collection, where=eq("doc_id", new_doc.doc_id)
+                )
+            self.journal.finish(entry.id)
+            return
+
+        if same_collection:
+            self._restore_vectors(new_doc.collection, new_doc.doc_id, prior_vectors)
+            if prior_doc is not None and prior_vectors:
+                report["restored"].append(new_doc.doc_id)
+        else:
+            self.vector_store.delete(
+                new_doc.collection, where=eq("doc_id", new_doc.doc_id)
+            )
+            if prior_doc is not None and prior_vectors:
+                existing = self.vector_store.get(
+                    prior_doc.collection, where=eq("doc_id", prior_doc.doc_id)
+                )
+                if len(existing) < len(prior_vectors):
+                    self._restore_vectors(
+                        prior_doc.collection, prior_doc.doc_id, prior_vectors
+                    )
+                    report["restored"].append(prior_doc.doc_id)
+        if sqlite_ok:
+            if prior_doc is not None:
+                self.doc_store.upsert(prior_doc)
+            else:
+                self.doc_store.delete(new_doc.doc_id)
+        report["rolled_back"].append(new_doc.doc_id)
+        self.journal.finish(entry.id)
+
+    def _repair_delete(self, entry, report: dict[str, Any]) -> None:
+        doc_id = entry.doc_id
+        collection = entry.collection
+        snapshot = [
+            load_vector(item)
+            for item in (entry.payload.get("snapshot") or [])
+            if isinstance(item, dict)
+        ]
+        doc = self.doc_store.get(doc_id)
+        if doc is None:
+            self.vector_store.delete(collection, where=eq("doc_id", doc_id))
+            if self.governance is not None:
+                self.governance.mark_deleted(doc_id)
+            self.journal.finish(entry.id)
+            return
+        if not snapshot:
+            self.journal.finish(entry.id)
+            return
+        rows = self.vector_store.get(collection, where=eq("doc_id", doc_id))
+        have = {row.id for row in rows}
+        need = {item.id for item in snapshot}
+        if need <= have:
+            self.journal.finish(entry.id)
+            return
+        self._restore_vectors(collection, doc_id, snapshot)
+        report["restored"].append(doc_id)
+        self.journal.finish(entry.id)
+
+    def _repair_cleanup(self, entry, report: dict[str, Any]) -> None:
+        doc_id = entry.doc_id
+        collection = entry.collection
+        if self.doc_store.get(doc_id) is not None:
+            self.delete_document(doc_id, collection)
+        else:
+            self.vector_store.delete(collection, where=eq("doc_id", doc_id))
+        self.journal.finish(entry.id)
+        report["cleanups"].append(doc_id)
+
+    def _pending_doc_ids(self) -> set[str]:
+        return {entry.doc_id for entry in self.journal.pending()}
+
+    def _gc_orphan_vectors(self) -> int:
+        pending = self._pending_doc_ids()
+        removed = 0
+        for collection in self.vector_store.collections():
+            grouped: dict[str, list[str]] = {}
+            for row in self.vector_store.get(collection):
+                doc_id = str((row.metadata or {}).get("doc_id") or "")
+                grouped.setdefault(doc_id, []).append(row.id)
+            for doc_id, ids in grouped.items():
+                if not ids or doc_id in pending:
+                    continue
+                if doc_id and self.doc_store.get(doc_id) is not None:
+                    continue
+                self.vector_store.delete(collection, ids=ids)
+                removed += len(ids)
+                logger.warning(
+                    "清理无父文档向量 %s 条（doc_id=%s, collection=%s）",
+                    len(ids),
+                    doc_id or "<empty>",
+                    collection,
+                )
+        return removed
+
+    def _note_vectorless(self, report: dict[str, Any]) -> None:
+        pending = self._pending_doc_ids()
+        seen = set(report["vectorless"])
+        for doc in self.doc_store.list():
+            if doc.doc_id in pending or doc.doc_id in seen:
+                continue
+            rows = self.vector_store.get(
+                doc.collection, where=eq("doc_id", doc.doc_id)
+            )
+            if rows:
+                continue
+            report["vectorless"].append(doc.doc_id)
+            seen.add(doc.doc_id)
+            logger.warning(
+                "文档 %s 仍在库中但没有向量，且没有可恢复快照", doc.doc_id
+            )
