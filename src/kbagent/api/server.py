@@ -110,6 +110,24 @@ def _key_matches(supplied: str, expected: str) -> bool:
         return False
 
 
+def refresh_error_response(doc_id: str, exc: IngestError) -> JSONResponse:
+    """刷新失败时的 HTTP 体。输入问题用 422，写坏了需要 repair 的用 500，但都带明文原因。"""
+    message = str(exc).strip() or "刷新文档失败"
+    needs_repair = any(
+        token in message for token in ("kb repair", "待清理", "无法恢复")
+    )
+    code = "repair_required" if needs_repair else "ingest_error"
+    return JSONResponse(
+        status_code=500 if needs_repair else 422,
+        content={
+            "error": code,
+            "message": message,
+            "doc_id": doc_id,
+            "detail": message,
+        },
+    )
+
+
 def public_source_path(path: str, expose: bool) -> str:
     """对外响应里的路径。默认去掉绝对路径；相对路径仍可返回。"""
     raw = path or ""
@@ -377,6 +395,11 @@ def create_app(
             new_id = kb.update_document(doc_id, req.content, title=req.title)
         except NotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except IngestError as exc:
+            # 库函数已经抛了 IngestError。不能再落到未捕获异常的
+            # {"detail": "Internal Server Error"}。
+            logger.warning("刷新文档 %s 失败: %s", doc_id, exc)
+            return refresh_error_response(doc_id, exc)
         return IngestResponse(doc_id=new_id, status="added")
 
     # ---- 统计 / 健康 ----

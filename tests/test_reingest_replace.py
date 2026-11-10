@@ -69,6 +69,91 @@ class _FailOnceAdd:
         return getattr(self._inner, name)
 
 
+def test_reingest_without_scope_keeps_private_and_hidden(tmp_path):
+    """同路径再入库不带 scope 时，private / hidden 不能回到默认检索。"""
+    kb = _kb(tmp_path)
+    try:
+        private_path = tmp_path / "private.md"
+        private_path.write_text("PRIVATE_APPLE 第一版秘密。", encoding="utf-8")
+        private_id = kb.ingest(private_path, scope="private").added[0]
+        hidden_path = tmp_path / "hidden.md"
+        hidden_path.write_text("HIDDEN_APPLE 第一版隐藏。", encoding="utf-8")
+        hidden_id = kb.ingest(hidden_path).added[0]
+        assert kb.hide_document(hidden_id)
+
+        private_path.write_text(
+            "PRIVATE_APPLE 第二版仍然不能被默认检索。", encoding="utf-8"
+        )
+        hidden_path.write_text(
+            "HIDDEN_APPLE 第二版仍然不能被默认检索。", encoding="utf-8"
+        )
+        assert kb.ingest(private_path).added == [private_id]
+        assert kb.ingest(hidden_path).added == [hidden_id]
+
+        for token, doc_id in (
+            ("PRIVATE_APPLE", private_id),
+            ("HIDDEN_APPLE", hidden_id),
+        ):
+            hits = kb.search(token, top_k=5)
+            assert hits == [] or all(hit.doc_id != doc_id for hit in hits)
+            assert all(token not in (hit.text or "") for hit in hits)
+            assert kb.get_document(doc_id) is None
+            assert doc_id not in {doc.doc_id for doc in kb.list_documents()}
+
+        private = kb.get_document(private_id, include_hidden=True)
+        hidden = kb.get_document(hidden_id, include_hidden=True)
+        assert private is not None
+        assert private.scope == "private"
+        assert private.status == "active"
+        assert hidden is not None
+        assert hidden.scope == "default"
+        assert hidden.status == "hidden"
+
+        private_meta = kb.get_doc_meta(private_id)
+        hidden_meta = kb.get_doc_meta(hidden_id)
+        assert private_meta is not None and private_meta.scope == "private"
+        assert private_meta.status == "active"
+        assert hidden_meta is not None and hidden_meta.status == "hidden"
+
+        private_rows = _vectors(kb, private_id)
+        hidden_rows = _vectors(kb, hidden_id)
+        assert private_rows and all(row.metadata.get("scope") == "private" for row in private_rows)
+        assert all("第二版" in row.document for row in private_rows)
+        assert hidden_rows and all(row.metadata.get("status") == "hidden" for row in hidden_rows)
+        assert all("第二版" in row.document for row in hidden_rows)
+
+        revealed = kb.search("PRIVATE_APPLE 第二版", top_k=3, include_hidden=True)
+        assert any(hit.doc_id == private_id and "第二版" in hit.text for hit in revealed)
+
+        private_path.write_text("PRIVATE_APPLE 第三版现在公开。", encoding="utf-8")
+        assert kb.ingest(private_path, scope="default").added == [private_id]
+        opened = kb.get_document(private_id)
+        assert opened is not None
+        assert opened.scope == "default"
+        assert opened.status == "active"
+        hits = kb.search("第三版现在公开", top_k=3)
+        assert any(hit.doc_id == private_id for hit in hits)
+    finally:
+        kb.close()
+
+
+def test_update_without_new_scope_keeps_hidden(kb):
+    doc_id = kb.ingest_text("HIDDEN_UPDATE 旧正文", title="笔记")
+    assert doc_id
+    assert kb.hide_document(doc_id)
+    new_id = kb.update_document(
+        doc_id, "HIDDEN_UPDATE 新正文", include_hidden=True
+    )
+    assert new_id
+    assert kb.search("HIDDEN_UPDATE", top_k=3) == []
+    got = kb.get_document(new_id, include_hidden=True)
+    assert got is not None
+    assert got.status == "hidden"
+    assert got.scope == "default"
+    assert "新正文" in got.full_text
+    assert kb.get_document(new_id) is None
+
+
 def test_same_path_reingest_replaces_vectors(tmp_path):
     kb = _kb(tmp_path)
     path = tmp_path / "note.md"

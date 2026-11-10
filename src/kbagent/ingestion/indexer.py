@@ -19,7 +19,7 @@ from typing import Any
 from ..config import Settings
 from ..document_store.base import DocumentStore
 from ..errors import IngestError, NotFoundError
-from ..governance import DocMeta, GovernanceStore
+from ..governance import ACTIVE_STATUS, HIDDEN_SCOPES, DocMeta, GovernanceStore
 from ..models import (
     SOURCE_BOUND,
     SOURCE_INLINE,
@@ -86,6 +86,15 @@ def _scalarize(meta: dict) -> dict:
         for k, v in meta.items()
         if isinstance(v, (str, int, float, bool)) or v is None
     }
+
+
+def _explicit_label(value: object) -> str | None:
+    """非空字符串才算调用方显式指定的 scope / status。"""
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return None
 
 
 def _plain_meta(meta: dict | None) -> dict:
@@ -157,11 +166,15 @@ class Indexer:
         metadata: dict | None = None,
         force: bool = False,
         scope: str | None = None,
+        *,
+        status: str | None = None,
     ) -> str | None:
         """入库一段文本。
 
         ``source_path`` 指向仍存在的文件时视为绑定原件：索引和扩写都读该文件，
         不把整篇正文写入 SQLite。没有外部路径时标为 ``inline``，正文留在应用库。
+        ``scope`` / ``status`` 缺省时，同路径替换沿用已有可见性，不把
+        private / hidden 洗成默认可检索。
         """
         raw = {
             "title": title or (Path(source_path).stem if source_path else "untitled"),
@@ -171,6 +184,7 @@ class Indexer:
             "metadata": metadata or {},
             "collection": collection or self.settings.default_collection,
             "scope": scope,
+            "status": status,
         }
         return self._ingest_raw(raw, force=force)
 
@@ -235,8 +249,12 @@ class Indexer:
             if loaded and (loaded[0].get("content") or "").strip():
                 content = loaded[0]["content"]
                 raw["doc_type"] = raw.get("doc_type") or loaded[0].get("doc_type", "text")
-        scope = raw.get("scope") or user_meta.get("scope") or self.settings.default_scope
-        status = "active"
+        # 没显式给 scope 时，不能落到 default + active。否则同路径再入库或替换
+        # 会把 private / hidden 洗成默认可检索。
+        requested_scope = _explicit_label(raw.get("scope")) or _explicit_label(
+            user_meta.get("scope")
+        )
+        requested_status = _explicit_label(raw.get("status"))
         if not content.strip():
             raise IngestError("空内容，跳过")
 
@@ -274,6 +292,17 @@ class Indexer:
                 "doc_id=%s 的 content_hash 仍是 12 hex，本次入库升级为完整 SHA256",
                 prior.doc_id,
             )
+
+        if requested_scope is not None:
+            # 调用方明确给了新范围：按这个范围写入，并把状态放回 active。
+            # 同时带了 status 时（替换且没换范围）仍用调用方给出的状态。
+            scope = requested_scope
+            status = requested_status or ACTIVE_STATUS
+        elif prior is not None:
+            scope, status = self._kept_visibility(prior)
+        else:
+            scope = self.settings.default_scope
+            status = requested_status or ACTIVE_STATUS
 
         chunks = self.chunker.chunk(doc_id, cleaned, base_meta=_scalarize({
             **user_meta,
@@ -738,6 +767,13 @@ class Indexer:
         doc = self.doc_store.get(doc_id)
         if not doc:
             raise NotFoundError(f"文档不存在: {doc_id}")
+        explicit_scope = _explicit_label(kwargs.get("scope")) if "scope" in kwargs else None
+        if explicit_scope is not None:
+            scope_arg: str | None = explicit_scope
+            status_arg: str | None = None
+        else:
+            # 替换没给新范围时，把原可见性带到可能换了 doc_id 的新文档上。
+            scope_arg, status_arg = self._kept_visibility(doc)
         new_id = self.ingest_text(
             content=new_content,
             title=kwargs.get("title", doc.title),
@@ -745,7 +781,8 @@ class Indexer:
             doc_type=kwargs.get("doc_type", doc.doc_type),
             collection=kwargs.get("collection", doc.collection),
             metadata=kwargs.get("metadata", doc.metadata),
-            scope=kwargs.get("scope", doc.scope),
+            scope=scope_arg,
+            status=status_arg,
         )
         if not new_id or new_id == doc_id:
             # 内容未变，或已按同一 doc_id 原地替换。不要再 delete。
@@ -809,7 +846,56 @@ class Indexer:
                 self.governance.record_audit("repair", detail=report)
             except Exception:
                 logger.warning("修复结果未能写入审计日志", exc_info=True)
+        notice = self._mark_vector_revision()
+        if notice:
+            report["notice"] = notice
+            logger.warning("%s", notice)
         return report
+
+    def _kept_visibility(self, prior: Document) -> tuple[str, str]:
+        """再入库没给新 scope 时沿用的范围和状态。
+
+        文档行和治理元数据只要有一边是 private / secret / 非 active，就保留更严的那一边，
+        避免只写了一边的隐藏被另一边的默认值洗掉。
+        """
+        scope = prior.scope or self.settings.default_scope
+        status = prior.status or ACTIVE_STATUS
+        if self.governance is None:
+            return scope, status
+        try:
+            meta = self.governance.get_meta(prior.doc_id)
+        except Exception:
+            logger.warning(
+                "读取文档 %s 的治理可见性失败，沿用文档行", prior.doc_id, exc_info=True
+            )
+            return scope, status
+        if meta is None:
+            return scope, status
+        if scope not in HIDDEN_SCOPES and meta.scope in HIDDEN_SCOPES:
+            scope = meta.scope
+        if status == ACTIVE_STATUS and meta.status not in (None, "", ACTIVE_STATUS):
+            status = meta.status
+        return scope, status
+
+    def _mark_vector_revision(self) -> str | None:
+        """告诉共用这个向量目录的其他进程：索引可能过期，下次检索要重开客户端。"""
+        marker = getattr(self.vector_store, "mark_shared_revision", None)
+        if not callable(marker):
+            return None
+        try:
+            notice = marker()
+        except Exception:
+            logger.warning(
+                "无法标记向量库修订。其他进程若检索为空，请重启那些进程。",
+                exc_info=True,
+            )
+            return (
+                "kb repair 已完成，但未能标记向量库修订。"
+                "其他正在运行的进程如果检索为空，请重启它们。"
+            )
+        if isinstance(notice, str) and notice.strip():
+            return notice
+        return None
 
     @staticmethod
     def _repair_dirty(report: dict[str, Any]) -> bool:
