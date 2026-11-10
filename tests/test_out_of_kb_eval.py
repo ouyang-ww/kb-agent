@@ -2,8 +2,28 @@
 
 from pathlib import Path
 
+from kbagent.config import Settings
 from kbagent.eval.dataset import EvalItem, load_dataset
+from kbagent.eval.metrics import refusal_recall
 from kbagent.eval.runner import Evaluator
+from kbagent.generation.answerability import assess
+
+# 2026-11-10，examples/sample_notes + bge-small-zh-v1.5 / bge-reranker-base 的 top1。
+# 单测只喂这些数，不下载模型。默认 τ 必须让库外 recall ≥ 0.9，且不拒答基线。
+_MEASURED_OUT_VECTOR = (
+    0.4049, 0.4556, 0.4426, 0.4905, 0.4460, 0.4535, 0.4543, 0.4223,
+    0.4007, 0.4607, 0.4336, 0.4959, 0.4187, 0.4366, 0.4527, 0.4561,
+    0.4525, 0.4408, 0.4529, 0.4436, 0.4305, 0.4373, 0.4118, 0.4571,
+    0.4493, 0.4474, 0.4304, 0.4780, 0.4633, 0.4852, 0.4111, 0.4592,
+)
+_MEASURED_OUT_RERANK = (
+    0.0, 0.0, 0.0, 0.0008, 0.0771, 0.0, 0.0006, 0.0,
+    0.0, 0.0029, 0.0008, 0.0004, 0.0, 0.0001, 0.0, 0.0016,
+    0.0004, 0.0, 0.0, 0.0295, 0.0, 0.0, 0.0, 0.0,
+    0.0002, 0.0, 0.0, 0.0101, 0.0005, 0.0011, 0.0, 0.3319,
+)
+_MEASURED_BASE_VECTOR = (0.6228, 0.6055, 0.5440, 0.5975, 0.7086)
+_MEASURED_BASE_RERANK = (0.9999, 0.9824, 0.9819, 0.9406, 0.9919)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _DATASET = _ROOT / "eval/datasets/out_of_kb.jsonl"
@@ -55,6 +75,34 @@ def test_out_of_kb_dataset_is_outside_the_sample_corpus():
         lowered = item.query.lower()
         for marker in _CORPUS_MARKERS:
             assert marker.lower() not in lowered
+
+
+def test_default_tau_refusal_recall_on_measured_scores():
+    """默认 τ，不改成 0 或 10。分数是上次实跑的 top1，不是现场下载的模型。"""
+    settings = Settings(
+        storage_dir="/tmp/kb-measured-tau",
+        embedding_model="unused",
+    )
+    assert settings.answer_tau_low == 0.52
+    assert settings.answer_rerank_tau_low == 0.50
+    vector_refused = [
+        assess(score, None, settings).action == "refuse" for score in _MEASURED_OUT_VECTOR
+    ]
+    rerank_refused = [
+        assess(0.4, score, settings).action == "refuse" for score in _MEASURED_OUT_RERANK
+    ]
+    assert refusal_recall(vector_refused) >= 0.9
+    assert refusal_recall(rerank_refused) >= 0.9
+    assert all(assess(score, None, settings).score_kind == "vector" for score in _MEASURED_OUT_VECTOR)
+    assert all(
+        assess(0.4, score, settings).score_kind == "rerank" for score in _MEASURED_OUT_RERANK
+    )
+    # 概率 0 必须仍是 0。再 sigmoid 会变成 0.5，默认 τ_low 就拒不掉。
+    zero = assess(0.4, 0.0, settings)
+    assert zero.top1_score == 0.0
+    assert zero.action == "refuse"
+    assert all(assess(score, None, settings).action != "refuse" for score in _MEASURED_BASE_VECTOR)
+    assert all(assess(0.4, score, settings).action != "refuse" for score in _MEASURED_BASE_RERANK)
 
 
 def test_refusal_harness_counts_gate_refusals_without_a_judge(kb):

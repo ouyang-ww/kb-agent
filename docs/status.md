@@ -33,10 +33,10 @@
 ### P1 可信与治理（2026-11-10）
 
 - **闸 1 可答性**：重排之后、生成之前。`top1 < τ_low` 直接拒答且不调用生成；中间带仍作答，但置信度降为 low，并提示「依据较弱」；达到 `τ_high` 正常作答。拒答是正常答案，写入 `answer_log.refusal_reason` / `confidence`
-- **τ 要重标**：向量默认 `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` = **0.52 / 0.54**。这是 2026-11-10 在 `examples/sample_notes` 上、用 `BAAI/bge-small-zh-v1.5`、L2 经 `1/(1+d)` 量出来的：库外 32 题 top1 最高 0.4959，基线五题最低 0.5440。重排默认 `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` = **0.50 / 0.90**，尺子是 `BAAI/bge-reranker-base` 的 `predict`（sentence-transformers 里已经是 Sigmoid 概率；库外最高 0.3319，基线最低 0.9406）。概率不再做第二次 sigmoid。logit 模型只在重排器里做一次数值稳定的 sigmoid。换嵌入、度量、重排模型或语料后这些数都会失效，要用库外集和基线集重新看 top1 再改
+- **τ 要重标**：向量默认 `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` = **0.52 / 0.54**。这是 2026-11-10 在 `examples/sample_notes` 上、用 `BAAI/bge-small-zh-v1.5`、L2 经 `1/(1+d)` 量出来的：库外 32 题 top1 最高 0.4959，基线五题最低 0.5440。重排默认 `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` = **0.50 / 0.90**，尺子是 `BAAI/bge-reranker-base` 的 `predict`（sentence-transformers 里已经是 Sigmoid 概率；库外最高 0.3319，基线最低 0.9406）。概率不再做第二次 sigmoid。重排器同时认 `activation_fn`（4.x）和 `default_activation_function`（2.7–3.x）；两个都没有、且分数已经在 [0, 1] 时也不再 sigmoid。确认是 logit 时只做一次数值稳定的 sigmoid。换嵌入、度量、重排模型或语料后这些数都会失效，要用库外集和基线集重新看 top1 再改
 - **闸 2 引用契约**：提示词只允许编号来源、事实句带 `[n]`、资料不足用固定句、末尾一行 `SELF_CHECK`。后检剥掉不在检索集合里的编号；全部编造或没有任何有效编号时改成固定拒答。不做闸 3 的陈述校验
 - **库外拒答集**：`eval/datasets/out_of_kb.jsonl`（32 题，当前样例笔记覆盖不到）。`kb eval --mode refusal --dataset eval/datasets/out_of_kb.jsonl` 计算 `refusal_recall`。这个模式不调用裁判；没有 LLM key 时，低于 τ 的拒答仍然计入，检索分够高但生成失败的那条不算拒答
-- **检索 fail-closed**：默认查询把 `status=active` 和 `scope` 排除 private/secret 写进向量 `where`。`retriever.search()` 不传这道过滤时由检索器补上；补不上就抛错，不会静默搜全库。`include_hidden=True` 才是旁路。文档行 / 治理元数据仍是第二道，隐藏近邻占满窗口时仍会扩大窗口
+- **检索 fail-closed**：默认查询的向量 `where` 是 `status=active` 且 `scope $in` 允许列表（`default`、`work`，再加配置里的 default scope）。不用 `$nin` 排除 private/secret：Chroma 的 `$nin` 会把缺字段也算进去。缺 scope 或空 scope 不会返回。`retriever.search()` 不传这道过滤时由检索器补上；补不上就抛错，不会静默搜全库。`include_hidden=True` 才是旁路。文档行 / 治理元数据仍是第二道，隐藏近邻占满窗口时仍会扩大窗口
 - **hide / unhide** 会把切块 `status` 写回去。`kb governance backfill` 给旧切块补 scope/status，否则缺这两项的旧切块不会被默认检索命中
 - **级联**：`vector_index` 消费 `doc_events`（hide / unhide / delete / pending_cleanup），失败进 `consumer_dead_letter` 后跳过。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只有名字和游标，游标停在 0，没有做学习模块
 
@@ -50,7 +50,7 @@
 
 ## 2. 当前验证
 
-- 全量测试：**202 passed**（2026-11-10）。默认 τ 下库外集重排关、重排开的 `refusal_recall` 都是 1.0（样例笔记四篇，bge-small-zh-v1.5 / bge-reranker-base，无 LLM key）
+- 全量测试：**207 passed**（2026-11-10）。默认 τ 下库外集重排关、重排开的 `refusal_recall` 都是 1.0（样例笔记四篇，bge-small-zh-v1.5 / bge-reranker-base，无 LLM key；重排开那次模型已加载）
 - `STRUCTURE.md` 已补上源文件回读与父全文迁移相关文件
 - 测试历史：本地 `test_history.log`（已 gitignore，不随仓库发布）
 
@@ -67,7 +67,7 @@
 
 ## 4. 已知边界
 
-- 默认检索的向量 `where` 要求切块带 `status=active`，且 `scope` 不是 private/secret。文档行和治理元数据仍是第二道。升级前缺这两项元数据的旧切块要跑一次 `kb governance backfill`
+- 默认检索的向量 `where` 要求 `status=active`，且 `scope` 落在允许列表（`default` / `work`，或配置的 default scope）里。缺 scope、空 scope、private、secret 都不会被这道 `where` 返回。文档行和治理元数据仍是第二道。升级前缺这两项元数据的旧切块要跑一次 `kb governance backfill`
 - 同路径再入库或替换时，如果调用方没有显式传入新的 scope，会保留原来的 scope 和 hidden / private 状态，不会洗成默认可检索。显式传入 scope 才会按新范围写入并把状态放回 active
 - 多个进程共用一个 Chroma 目录时，另一个进程的 `kb repair` 或向量改写会让本进程已经加载的内存索引过期：`get` 能看到新记录，`query` 仍可能返回已删除的 id，默认检索因此变空。下一次检索会对比目录签名并重新打开客户端。跨进程改写之后，同一进程里随后的检索可能因为 mtime/fingerprint 继续漂移而每次都重新打开；结果仍然正确，本轮不处理。`kb repair` 的结果里有 `notice`，命令行也会打到 stderr：若检索仍然为空，重启那个进程。Chroma 不保证多个进程同时写入同一目录是安全的
 - `answer_log` / `audit_log` 暂无保留期与轮转策略

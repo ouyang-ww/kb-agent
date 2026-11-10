@@ -73,7 +73,7 @@ top1_score ≥ τ_high                 → 正常回答
 **P1 已落地。** 闸门在重排之后、生成之前执行。拒答写入 `answer_log.refusal_reason` / `confidence`，是正常答案，不是异常。
 
 - `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` 默认 **0.52 / 0.54**。只适用于 `BAAI/bge-small-zh-v1.5` 的向量相关度（L2 经 `1/(1+d)`），并且是对着 `examples/sample_notes` 标定的：库外 top1 最高 0.4959，基线最低 0.5440。
-- `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` 默认 **0.50 / 0.90**。尺子是 `BAAI/bge-reranker-base` 的 `predict`。sentence-transformers 对该模型使用 Sigmoid，输出已经是概率（库外最高 0.3319，基线最低 0.9406）。闸门不再对这个数做第二次 sigmoid。激活函数不是 Sigmoid 时，重排器只做一次数值稳定的 sigmoid，再和这对 τ 比较。
+- `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` 默认 **0.50 / 0.90**。尺子是 `BAAI/bge-reranker-base` 的 `predict`。sentence-transformers 对该模型使用 Sigmoid，输出已经是概率（库外最高 0.3319，基线最低 0.9406）。闸门不再对这个数做第二次 sigmoid。重排器同时看 `activation_fn`（sentence-transformers 4.x）和 `default_activation_function`（2.7–3.x）。确认不是 Sigmoid 时才做一次数值稳定的 sigmoid。两个属性都没有、且分数已经在 [0, 1] 时，也不再 sigmoid。
 - 换嵌入模型、向量度量、重排模型或语料后，用 `eval/datasets/baseline.jsonl` 和 `eval/datasets/out_of_kb.jsonl` 重看 top1，再改 τ。上一套模型的数字不能直接搬过来。
 
 #### 闸 2：生成契约
@@ -223,12 +223,13 @@ Chroma 过滤示例：
 
 ```python
 where = {"$and": [
-    {"scope": {"$ne": "private"}},
-    {"scope": {"$ne": "secret"}},
-    {"status": {"$eq": "active"}},
+    {"status": "active"},
+    {"scope": {"$in": ["default", "work"]}},
 ]}
 collection.query(query_embeddings=[vec], n_results=k, where=where)
 ```
+
+用允许列表，不用 `scope $nin private/secret`。Chroma 的 `$nin` 会命中缺字段，空 scope 也会漏过去。缺 scope 或 `scope=""` 不应出现在默认检索里。
 
 概念可见性规则：
 
@@ -287,7 +288,7 @@ kb audit --since 2026-10-01
 
 第 6 条最重要：**让"忘记过滤"变成编译期/测试期错误**，而不是运行时漏洞。
 
-**P1 已落地。** `retriever.search()` 在没有 `include_hidden=True` 时会把 `status=active` 且 scope 排除 private/secret 并进向量 `where`。这道条件补不上就抛错，不会静默搜全库。文档行和治理元数据仍是第二道。hide / unhide 会把切块 `status` 写回去。
+**P1 已落地。** `retriever.search()` 在没有 `include_hidden=True` 时会把 `status=active` 且 `scope $in` 允许列表并进向量 `where`。允许列表是 `default`、`work`，再加上配置的 default scope。缺 scope、空 scope、private、secret 都不会被返回。这道条件补不上就抛错，不会静默搜全库。文档行和治理元数据仍是第二道。hide / unhide 会把切块 `status` 写回去。
 
 ---
 
