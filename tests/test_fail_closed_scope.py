@@ -8,7 +8,7 @@ from kbagent.governance import visibility_is_enforced
 from kbagent.governance.consumers import RESIDUAL_CONSUMERS, drain_consumers
 from kbagent.governance.store import GovernanceStore
 from kbagent.retrieval.retriever import Retriever
-from kbagent.storage.filters import and_where, any_of, compile_chroma, eq
+from kbagent.storage.filters import all_of, and_where, any_of, compile_chroma, eq, nin
 from kbagent.vectorstore.base import VectorHit
 
 from helpers import FakeEmbedder
@@ -69,7 +69,7 @@ def test_search_without_caller_filter_stays_closed(tmp_path):
 
 def test_forgotten_visibility_filter_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "kbagent.retrieval.retriever.visibility_filter", lambda: None
+        "kbagent.retrieval.retriever.visibility_filter", lambda *_args, **_kwargs: None
     )
     store = _RecordingStore(
         [_hit("v", "vis", status="active", scope="default", score=0.5)]
@@ -79,6 +79,55 @@ def test_forgotten_visibility_filter_is_rejected(tmp_path, monkeypatch):
     with pytest.raises(KBError, match="scope/status"):
         retriever.search("q", top_k=1)
     assert store.wheres == []
+
+
+def test_missing_or_empty_scope_is_not_searched(tmp_path):
+    from kbagent.vectorstore.chroma_store import ChromaStore
+
+    store = ChromaStore(tmp_path / "chroma")
+    store.add(
+        "personal",
+        ["ok", "noscope", "empty", "hidden", "private"],
+        [[1.0, 0.0]] * 5,
+        ["可见", "缺范围", "空范围", "隐藏", "私有"],
+        [
+            {"doc_id": "ok", "status": "active", "scope": "default"},
+            {"doc_id": "noscope", "status": "active"},
+            {"doc_id": "empty", "status": "active", "scope": ""},
+            {"doc_id": "hidden", "status": "hidden", "scope": "default"},
+            {"doc_id": "private", "status": "active", "scope": "private"},
+        ],
+    )
+    settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")
+    retriever = Retriever(
+        _FixedEmbedder(),
+        store,
+        settings,
+        doc_visibility=lambda _doc_id: True,
+    )
+    hits = retriever.search("q", top_k=10)
+    assert {hit.doc_id for hit in hits} == {"ok"}
+    store.close()
+
+
+class _FixedEmbedder:
+    def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+
+def test_nin_is_not_treated_as_closed(tmp_path):
+    opened = all_of(eq("status", "active"), nin("scope", ["private", "secret"]))
+    assert visibility_is_enforced(opened) is False
+    settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")
+    retriever = Retriever(FakeEmbedder(), _RecordingStore([]), settings)
+    where = retriever._scoped_where(None, include_hidden=False)
+    blob = str(compile_chroma(where))
+    assert "$in" in blob
+    assert "default" in blob
+    assert "$nin" not in blob
 
 
 def test_and_where_keeps_visibility_beside_a_tag():

@@ -85,12 +85,12 @@ class Retriever:
     def _scoped_where(self, where: Where, include_hidden: bool) -> Where:
         if include_hidden:
             return where
-        merged = and_where(where, visibility_filter())
+        merged = and_where(where, visibility_filter(self.settings.default_scope))
         if not visibility_is_enforced(merged):
             raise KBError(
                 "检索缺少 scope/status 过滤，已拒绝执行。"
-                "默认检索必须排除 private/secret 和非 active；"
-                "只有显式 include_hidden=True 可以关闭这道过滤。"
+                "默认检索只接受 status=active 且 scope 在允许列表里的切块；"
+                "缺 scope 或空 scope 不会返回。只有显式 include_hidden=True 可以关闭这道过滤。"
             )
         return merged
 

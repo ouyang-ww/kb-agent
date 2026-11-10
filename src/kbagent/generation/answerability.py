@@ -1,17 +1,13 @@
 """闸 1：重排之后、生成之前，按 top1 分数决定拒答、弱证据或正常回答。
 
-τ 不是通用常数。默认值只针对「向量相关度」这一档：
-L2 距离经 ``1/(1+d)`` 折到 (0, 1]，起始刻度按 BAAI/bge-small-zh-v1.5
-配这个折算来写。换嵌入模型、换度量，或把重排 logit 直接拿来比，都要重标。
-
-重排分数是另一把尺子。没有单独配置 ``KB_ANSWER_RERANK_TAU_*`` 时，
-只把 logit 做一次 sigmoid 再套向量 τ，并在 meta 里标明
-``score_kind=rerank_sigmoid``。这是占位，不是校准结果。
+τ 不是通用常数。向量默认值按 ``BAAI/bge-small-zh-v1.5``、L2 经 ``1/(1+d)``、
+样例笔记加库外集标定。重排默认值按 ``BAAI/bge-reranker-base`` 的 ``predict``
+输出标定，那个数已经是 Sigmoid 概率，这里不再做第二次 sigmoid。
+换嵌入、度量、重排模型或语料后都要重标。
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from ..config import Settings
@@ -78,7 +74,11 @@ def _decide(score: float, low: float, high: float, kind: str, calibrated: bool) 
 
 
 def assess(score: float, rerank_score: float | None, settings: Settings) -> Answerability:
-    """``score`` 是向量相关度；``rerank_score`` 有值表示这次排序用了重排 logit。"""
+    """``rerank_score`` 有值就用重排阈值。它必须已经和 ``KB_ANSWER_RERANK_TAU_*`` 同一把尺子。
+
+    bge-reranker 的 predict 是概率，重排器原样写入。logit 模型由重排器做一次稳定 sigmoid
+    再写入。这里不再 sigmoid，避免把 0 变成 0.5。
+    """
     if not settings.answerability_enabled:
         top = rerank_score if rerank_score is not None else score
         return Answerability(
@@ -92,18 +92,12 @@ def assess(score: float, rerank_score: float | None, settings: Settings) -> Answ
             False,
         )
     if rerank_score is not None:
-        low = settings.answer_rerank_tau_low
-        high = settings.answer_rerank_tau_high
-        if low is not None and high is not None:
-            return _decide(float(rerank_score), low, high, "rerank", True)
-        # 未标定的 logit 不能拿去和 0–1 的 τ 比。sigmoid 只是让闸门还能关上。
-        prob = 1.0 / (1.0 + math.exp(-float(rerank_score)))
         return _decide(
-            prob,
-            settings.answer_tau_low,
-            settings.answer_tau_high,
-            "rerank_sigmoid",
-            False,
+            float(rerank_score),
+            float(settings.answer_rerank_tau_low),
+            float(settings.answer_rerank_tau_high),
+            "rerank",
+            True,
         )
     return _decide(
         float(score),

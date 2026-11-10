@@ -247,7 +247,7 @@ def governance_drain():
 
 @governance_app.command("backfill")
 def governance_backfill():
-    """为旧文档补充 docs_meta（缺失时按文档字段生成）。"""
+    """为旧文档补充 docs_meta，并把 scope/status 写回已有切块。"""
     kb = _kb()
     created = kb.backfill_governance()
     typer.echo(f"已补充 {created} 条 docs_meta")

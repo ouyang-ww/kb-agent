@@ -72,9 +72,9 @@ top1_score ≥ τ_high                 → 正常回答
 
 **P1 已落地。** 闸门在重排之后、生成之前执行。拒答写入 `answer_log.refusal_reason` / `confidence`，是正常答案，不是异常。
 
-- `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` 默认 0.45 / 0.62。这只适用于向量相关度：L2 距离经 `1/(1+d)` 折到 (0, 1]，起点按 `BAAI/bge-small-zh-v1.5` 配这个折算来写。
-- 重排 logit 是另一把尺子。`KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` 要成对设置。没设时，logit 先做 sigmoid 再套向量 τ，答案 meta 标 `score_kind=rerank_sigmoid`、`tau_calibrated=false`。这是占位，不是校准结果。
-- 换嵌入模型、向量度量或重排模型后，用 `eval/datasets/baseline.jsonl` 和 `eval/datasets/out_of_kb.jsonl` 看应回答与应拒答的 top1 分布，再改 τ。不要把上一套模型的数字直接搬过来。
+- `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` 默认 **0.52 / 0.54**。只适用于 `BAAI/bge-small-zh-v1.5` 的向量相关度（L2 经 `1/(1+d)`），并且是对着 `examples/sample_notes` 标定的：库外 top1 最高 0.4959，基线最低 0.5440。
+- `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` 默认 **0.50 / 0.90**。尺子是 `BAAI/bge-reranker-base` 的 `predict`。sentence-transformers 对该模型使用 Sigmoid，输出已经是概率（库外最高 0.3319，基线最低 0.9406）。闸门不再对这个数做第二次 sigmoid。激活函数不是 Sigmoid 时，重排器只做一次数值稳定的 sigmoid，再和这对 τ 比较。
+- 换嵌入模型、向量度量、重排模型或语料后，用 `eval/datasets/baseline.jsonl` 和 `eval/datasets/out_of_kb.jsonl` 重看 top1，再改 τ。上一套模型的数字不能直接搬过来。
 
 #### 闸 2：生成契约
 

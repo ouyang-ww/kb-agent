@@ -163,6 +163,10 @@ class Evaluator:
         row["answer"] = ans.text
         row["refusal_reason"] = ans.meta.get("refusal_reason")
         row["confidence"] = ans.meta.get("confidence")
+        row["score_kind"] = ans.meta.get("score_kind")
+        row["top1_score"] = ans.meta.get("top1_score")
+        row["tau_calibrated"] = ans.meta.get("tau_calibrated")
+        row["rerank_fallback"] = bool(ans.meta.get("rerank_fallback"))
         row["refused"] = bool(ans.meta.get("refusal_reason")) or is_refusal_text(ans.text)
         return row
 

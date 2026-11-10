@@ -101,8 +101,11 @@ class RAGPipeline:
             collection=collection,
             include_hidden=include_hidden,
         )
+        rerank_error = None
         if rerank_on:
             hits = self.reranker.rerank(plan.rewritten_query, candidates, top_k=top_k)
+            if hits and hits[0].rerank_error:
+                rerank_error = hits[0].rerank_error
         else:
             hits = candidates[:top_k]
 
@@ -113,13 +116,18 @@ class RAGPipeline:
                 {**meta, "retrieved": 0, "confidence": "low", "refusal_reason": "no_hits", "answerability": "refuse"},
             )
 
+        # 重排没跑成时 rerank_score 为空，闸门用向量分。meta 必须写明这次退回，
+        # 不能让 score_kind=vector 看起来像一次主动的向量标定。
         decision = assess(
             hits[0].score,
-            hits[0].rerank_score,
+            None if rerank_error else hits[0].rerank_score,
             self.settings,
         )
         meta.update(decision.as_meta())
         meta["retrieved"] = len(hits)
+        if rerank_error:
+            meta["rerank_fallback"] = True
+            meta["rerank_error"] = rerank_error
 
         context = self.parent_expander.expand(hits)
         sources = self._sources(context)

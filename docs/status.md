@@ -33,7 +33,7 @@
 ### P1 可信与治理（2026-11-10）
 
 - **闸 1 可答性**：重排之后、生成之前。`top1 < τ_low` 直接拒答且不调用生成；中间带仍作答，但置信度降为 low，并提示「依据较弱」；达到 `τ_high` 正常作答。拒答是正常答案，写入 `answer_log.refusal_reason` / `confidence`
-- **τ 要重标**：`KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` 默认 **0.45 / 0.62**，只适用于向量相关度（L2 距离经 `1/(1+d)` 折到 0–1），起点按 `BAAI/bge-small-zh-v1.5` 配这个折算来写，不是通用常数。重排 logit 用 `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH`（必须成对设置）。没设时，logit 先做 sigmoid 再套向量 τ，答案 meta 里 `score_kind=rerank_sigmoid`、`tau_calibrated=false`，这只是占位。换嵌入模型、度量或重排模型后，用基线集和库外集看 top1 分布再改这两个数
+- **τ 要重标**：向量默认 `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` = **0.52 / 0.54**。这是 2026-11-10 在 `examples/sample_notes` 上、用 `BAAI/bge-small-zh-v1.5`、L2 经 `1/(1+d)` 量出来的：库外 32 题 top1 最高 0.4959，基线五题最低 0.5440。重排默认 `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` = **0.50 / 0.90**，尺子是 `BAAI/bge-reranker-base` 的 `predict`（sentence-transformers 里已经是 Sigmoid 概率；库外最高 0.3319，基线最低 0.9406）。概率不再做第二次 sigmoid。logit 模型只在重排器里做一次数值稳定的 sigmoid。换嵌入、度量、重排模型或语料后这些数都会失效，要用库外集和基线集重新看 top1 再改
 - **闸 2 引用契约**：提示词只允许编号来源、事实句带 `[n]`、资料不足用固定句、末尾一行 `SELF_CHECK`。后检剥掉不在检索集合里的编号；全部编造或没有任何有效编号时改成固定拒答。不做闸 3 的陈述校验
 - **库外拒答集**：`eval/datasets/out_of_kb.jsonl`（32 题，当前样例笔记覆盖不到）。`kb eval --mode refusal --dataset eval/datasets/out_of_kb.jsonl` 计算 `refusal_recall`。这个模式不调用裁判；没有 LLM key 时，低于 τ 的拒答仍然计入，检索分够高但生成失败的那条不算拒答
 - **检索 fail-closed**：默认查询把 `status=active` 和 `scope` 排除 private/secret 写进向量 `where`。`retriever.search()` 不传这道过滤时由检索器补上；补不上就抛错，不会静默搜全库。`include_hidden=True` 才是旁路。文档行 / 治理元数据仍是第二道，隐藏近邻占满窗口时仍会扩大窗口
@@ -50,7 +50,7 @@
 
 ## 2. 当前验证
 
-- 全量测试：**198 passed**（2026-11-10，含 P1 闸门、引用契约、库外拒答集、fail-closed scope）
+- 全量测试：**202 passed**（2026-11-10）。默认 τ 下库外集重排关、重排开的 `refusal_recall` 都是 1.0（样例笔记四篇，bge-small-zh-v1.5 / bge-reranker-base，无 LLM key）
 - `STRUCTURE.md` 已补上源文件回读与父全文迁移相关文件
 - 测试历史：本地 `test_history.log`（已 gitignore，不随仓库发布）
 

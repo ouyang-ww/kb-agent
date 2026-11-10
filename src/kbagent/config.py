@@ -54,9 +54,7 @@ class Settings(BaseSettings):
 
     @field_validator("answer_rerank_tau_low", "answer_rerank_tau_high")
     @classmethod
-    def _check_rerank_tau(cls, v: float | None) -> float | None:
-        if v is None:
-            return None
+    def _check_rerank_tau(cls, v: float) -> float:
         number = float(v)
         if number != number or number in (float("inf"), float("-inf")):
             raise ValueError("重排可答性阈值必须是有限数")
@@ -66,13 +64,7 @@ class Settings(BaseSettings):
     def _tau_order(self):
         if self.answer_tau_low > self.answer_tau_high:
             raise ValueError("KB_ANSWER_TAU_LOW 不能高于 KB_ANSWER_TAU_HIGH")
-        low = self.answer_rerank_tau_low
-        high = self.answer_rerank_tau_high
-        if (low is None) ^ (high is None):
-            raise ValueError(
-                "KB_ANSWER_RERANK_TAU_LOW 和 KB_ANSWER_RERANK_TAU_HIGH 必须同时设置"
-            )
-        if low is not None and high is not None and low > high:
+        if self.answer_rerank_tau_low > self.answer_rerank_tau_high:
             raise ValueError(
                 "KB_ANSWER_RERANK_TAU_LOW 不能高于 KB_ANSWER_RERANK_TAU_HIGH"
             )
@@ -109,17 +101,17 @@ class Settings(BaseSettings):
     top_k: int = 5
 
     # ---- 闸 1：可答性 ----
-    # 默认 τ 只适用于向量相关度：L2 距离经 1/(1+d) 折到 (0, 1]。
-    # 起始刻度按 BAAI/bge-small-zh-v1.5 配这个折算来写，不是通用常数。
-    # 换嵌入模型、换度量，或重排模型换了，都要重标。见 docs/status.md。
+    # 2026-11-10，语料 examples/sample_notes 四篇，嵌入 BAAI/bge-small-zh-v1.5，
+    # 向量分是 L2 经 1/(1+d)。库外 32 题 top1 最高 0.4959，基线五题最低 0.5440。
+    # τ_low=0.52 卡在这两端之间。τ_high=0.54，基线最低分仍算正常回答。
+    # 重排是 BAAI/bge-reranker-base。sentence-transformers 的 predict 已是 Sigmoid
+    # 概率：库外最高 0.3319，基线最低 0.9406。τ 用 0.50 / 0.90，不再对概率做第二次 sigmoid。
+    # 换嵌入、度量、重排模型或语料后必须重标，见 docs/status.md。
     answerability_enabled: bool = True
-    answer_tau_low: float = 0.45
-    answer_tau_high: float = 0.62
-    # 重排 logit 的单独阈值。两个都留空时，闸门把 logit 做 sigmoid 再套上面的向量 τ，
-    # 并在答案 meta 里标 score_kind=rerank_sigmoid、tau_calibrated=false。
-    # 那只是占位。标定之后把这两个值设上，闸门就直接比较原始 rerank 分。
-    answer_rerank_tau_low: float | None = None
-    answer_rerank_tau_high: float | None = None
+    answer_tau_low: float = 0.52
+    answer_tau_high: float = 0.54
+    answer_rerank_tau_low: float = 0.50
+    answer_rerank_tau_high: float = 0.90
 
     # ---- 意图识别 / 查询改写 ----
     intent_enabled: bool = True
