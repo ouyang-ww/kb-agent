@@ -267,10 +267,15 @@ def repair():
 
     恢复未写完的替换（旧文档仍可检索）、清理没有父文档的向量，
     并删除已标记待清理的旧文档。可重复执行。
+    其他进程若和本库共用 Chroma 目录，会在下次检索时重新打开客户端；
+    若那些进程检索仍然为空，需要重启它们。
     """
     kb = _kb()
     report = kb.repair()
     typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    notice = report.get("notice")
+    if isinstance(notice, str) and notice.strip():
+        typer.echo(notice, err=True)
     if report.get("errors") or report.get("vectorless"):
         raise typer.Exit(1)
 

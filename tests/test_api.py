@@ -146,6 +146,68 @@ def test_refresh_document(tmp_path):
     assert new_id != doc_id
 
 
+def test_refresh_ingest_error_is_structured(tmp_path, monkeypatch):
+    """IngestError 不能变成没有原因的 Internal Server Error。"""
+    from kbagent.errors import IngestError
+    from kbagent.kb import KnowledgeBase
+
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=False,
+        llm_api_key="test",
+        llm_base_url="http://localhost:9999/v1",
+    )
+    kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=FakeLLM())
+    client = TestClient(create_app(kb=kb, settings=settings))
+    try:
+        doc_id = client.post("/v1/ingest", json={"content": "刷新前的正文 KEEP"}).json()[
+            "doc_id"
+        ]
+
+        def boom(doc_id_arg, new_content, **kwargs):
+            raise IngestError("injected refresh failure")
+
+        monkeypatch.setattr(kb, "update_document", boom)
+        failed = client.post(
+            f"/v1/documents/{doc_id}/refresh",
+            json={"content": "不会写入的新正文"},
+        )
+        assert failed.status_code == 422
+        body = failed.json()
+        assert body["error"] == "ingest_error"
+        assert body["doc_id"] == doc_id
+        assert "injected refresh failure" in body["message"]
+        assert body["detail"] == body["message"]
+        assert body != {"detail": "Internal Server Error"}
+        kept = client.get(
+            f"/v1/documents/{doc_id}", params={"include_text": True}
+        )
+        assert kept.status_code == 200
+        assert "KEEP" in kept.json()["full_text"]
+
+        def repair_boom(doc_id_arg, new_content, **kwargs):
+            raise IngestError("入库失败且无法恢复旧文档，请运行 kb repair: injected")
+
+        monkeypatch.setattr(kb, "update_document", repair_boom)
+        repaired = client.post(
+            f"/v1/documents/{doc_id}/refresh",
+            json={"content": "仍然不会写入"},
+        )
+        assert repaired.status_code == 500
+        body = repaired.json()
+        assert body["error"] == "repair_required"
+        assert body["doc_id"] == doc_id
+        assert "kb repair" in body["message"]
+        assert "injected" in body["message"]
+        assert "Internal Server Error" not in body["message"]
+    finally:
+        kb.close()
+
+
 def test_auth_required(tmp_path):
     c = _make_client(tmp_path, api_key="secret")
     assert c.get("/v1/stats").status_code == 401
