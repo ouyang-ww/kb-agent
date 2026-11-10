@@ -59,22 +59,28 @@ class Condition:
 
 @dataclass(frozen=True)
 class Filter:
-    """条件为 AND；``any_of`` 中的每个子 Filter 之间为 OR。"""
+    """条件为 AND；``any_of`` 中的每个子 Filter 之间为 OR。
+
+    ``conjuncts`` 把已经成形的子过滤器再 AND 起来。简单条件仍走
+    ``conditions``，这样 ``eq & ne`` 的结果和以前一样。
+    """
 
     conditions: tuple[Condition, ...] = ()
     any_of: tuple["Filter", ...] = ()
+    conjuncts: tuple["Filter", ...] = ()
 
     def __and__(self, other: "Filter") -> "Filter":
         return Filter(
             conditions=self.conditions + other.conditions,
             any_of=self.any_of + other.any_of,
+            conjuncts=self.conjuncts + other.conjuncts,
         )
 
     def __or__(self, other: "Filter") -> "Filter":
         return Filter(any_of=(self, other))
 
     def __bool__(self) -> bool:
-        return bool(self.conditions or self.any_of)
+        return bool(self.conditions or self.any_of or self.conjuncts)
 
 
 # 旧版 API 兼容：Store 方法接受 Filter / dict / None
@@ -117,10 +123,29 @@ def all_of(*filters: Filter) -> Filter:
     """多个 Filter 取 AND。"""
     conditions: tuple[Condition, ...] = ()
     groups: tuple[Filter, ...] = ()
+    conjuncts: tuple[Filter, ...] = ()
     for f in filters:
         conditions += f.conditions
         groups += f.any_of
-    return Filter(conditions, groups)
+        conjuncts += f.conjuncts
+    return Filter(conditions, groups, conjuncts)
+
+
+def and_where(left: Where, right: Where) -> Filter | None:
+    """把两段过滤条件 AND 在一起。任一侧为空则返回另一侧。
+
+    两边都只是字段条件时拼进同一个条件列表。任一侧带 OR 或已经是
+    组合条件时，收成 ``conjuncts``，避免把两个 OR 并成一个 OR。
+    """
+    a = normalize_filter(left)
+    b = normalize_filter(right)
+    if not a:
+        return b
+    if not b:
+        return a
+    if not a.any_of and not a.conjuncts and not b.any_of and not b.conjuncts:
+        return Filter(conditions=a.conditions + b.conditions)
+    return Filter(conjuncts=(a, b))
 
 
 def any_of(*filters: Filter) -> Filter:
@@ -189,6 +214,10 @@ def _compile_chroma_filter(f: Filter) -> dict[str, Any]:
     ]
     if f.any_of:
         parts.append({"$or": [_compile_chroma_filter(g) for g in f.any_of]})
+    for sub in f.conjuncts:
+        compiled = _compile_chroma_filter(sub)
+        if compiled:
+            parts.append(compiled)
     if not parts:
         return {}
     if len(parts) == 1:
@@ -244,4 +273,8 @@ def _compile_sql_filter(
             or_parts.append(f"({sub})")
             params.extend(sub_params)
         clauses.append("(" + " OR ".join(or_parts) + ")")
+    for sub_filter in f.conjuncts:
+        sub, sub_params = _compile_sql_filter(sub_filter, allowed_fields)
+        clauses.append(f"({sub})")
+        params.extend(sub_params)
     return (" AND ".join(clauses) or "1=1"), params

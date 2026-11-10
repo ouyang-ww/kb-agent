@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +44,32 @@ class Settings(BaseSettings):
             raise ValueError("KB_MAX_CONCURRENT_UPLOADS 必须大于 0")
         return int(v)
 
+    @field_validator("answer_tau_low", "answer_tau_high")
+    @classmethod
+    def _check_tau(cls, v: float) -> float:
+        number = float(v)
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError("可答性阈值必须是有限数")
+        return number
+
+    @field_validator("answer_rerank_tau_low", "answer_rerank_tau_high")
+    @classmethod
+    def _check_rerank_tau(cls, v: float) -> float:
+        number = float(v)
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError("重排可答性阈值必须是有限数")
+        return number
+
+    @model_validator(mode="after")
+    def _tau_order(self):
+        if self.answer_tau_low > self.answer_tau_high:
+            raise ValueError("KB_ANSWER_TAU_LOW 不能高于 KB_ANSWER_TAU_HIGH")
+        if self.answer_rerank_tau_low > self.answer_rerank_tau_high:
+            raise ValueError(
+                "KB_ANSWER_RERANK_TAU_LOW 不能高于 KB_ANSWER_RERANK_TAU_HIGH"
+            )
+        return self
+
     # ---- 存储 ----
     storage_dir: Path = Path.home() / ".kbagent"
     default_collection: str = "personal"
@@ -73,6 +99,19 @@ class Settings(BaseSettings):
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_candidates: int = 20
     top_k: int = 5
+
+    # ---- 闸 1：可答性 ----
+    # 2026-11-10，语料 examples/sample_notes 四篇，嵌入 BAAI/bge-small-zh-v1.5，
+    # 向量分是 L2 经 1/(1+d)。库外 32 题 top1 最高 0.4959，基线五题最低 0.5440。
+    # τ_low=0.52 卡在这两端之间。τ_high=0.54，基线最低分仍算正常回答。
+    # 重排是 BAAI/bge-reranker-base。sentence-transformers 的 predict 已是 Sigmoid
+    # 概率：库外最高 0.3319，基线最低 0.9406。τ 用 0.50 / 0.90，不再对概率做第二次 sigmoid。
+    # 换嵌入、度量、重排模型或语料后必须重标，见 docs/status.md。
+    answerability_enabled: bool = True
+    answer_tau_low: float = 0.52
+    answer_tau_high: float = 0.54
+    answer_rerank_tau_low: float = 0.50
+    answer_rerank_tau_high: float = 0.90
 
     # ---- 意图识别 / 查询改写 ----
     intent_enabled: bool = True

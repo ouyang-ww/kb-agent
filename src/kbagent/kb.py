@@ -14,11 +14,13 @@ from typing import Any
 from .config import Settings
 from .document_store.base import DocumentStore
 from .embedding.local import SentenceTransformerEmbedder
-from .errors import NotFoundError
+from .errors import KBError, NotFoundError
 from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
-from .governance import DocMeta, GovernanceStore, is_visible
+from .governance import ACTIVE_STATUS, HIDDEN_SCOPES, DocMeta, GovernanceStore, is_visible
+from .governance.consumers import VectorIndexConsumer, drain_consumers
+from .governance.vectors import sync_chunk_governance
 from .governance.originals import RE_INGEST_HINT, migrate_document
 from .ingestion.indexer import IngestReport, Indexer
 from .models import Answer, Document, RetrievalHit
@@ -32,6 +34,24 @@ from .vectorstore.base import VectorStore
 from .vision.indexer import VisionIndexer
 
 logger = logging.getLogger(__name__)
+
+
+def _stricter_visibility(
+    doc_scope: str | None,
+    doc_status: str | None,
+    meta_scope: str | None,
+    meta_status: str | None,
+) -> tuple[str, str]:
+    """文档行和治理元数据不一致时，保留更严的一边。"""
+    scope = meta_scope or doc_scope or "default"
+    status = meta_status or doc_status or ACTIVE_STATUS
+    if doc_scope in HIDDEN_SCOPES or meta_scope in HIDDEN_SCOPES:
+        scope = meta_scope if meta_scope in HIDDEN_SCOPES else doc_scope or scope
+    if doc_status not in (None, "", ACTIVE_STATUS):
+        status = doc_status or status
+    if meta_status not in (None, "", ACTIVE_STATUS):
+        status = meta_status or status
+    return scope, status
 
 
 class KnowledgeBase:
@@ -136,6 +156,9 @@ class KnowledgeBase:
             self._reranker,
             self._parent_expander,
         )
+        self._vector_consumer = VectorIndexConsumer(
+            self._vector_store, self._doc_store, self.settings
+        )
 
     # ================= 写入 / 管理 =================
     def ingest(
@@ -193,6 +216,7 @@ class KnowledgeBase:
                 self.governance.record_audit(
                     "document.delete", doc_id, actor=actor
                 )
+                self.drain_consumers()
             return ok
 
     def update_document(
@@ -262,8 +286,14 @@ class KnowledgeBase:
             meta.status = "hidden"
             self.governance.upsert_meta(meta)
             self._doc_store.set_status(doc_id, "hidden")
-            self.governance.emit_event(doc_id, "hide")
+            self.governance.emit_event(
+                doc_id,
+                "hide",
+                {"collection": doc.collection, "status": "hidden"},
+            )
             self.governance.record_audit("document.hide", doc_id, actor=actor)
+            self._sync_chunk_status(doc.collection, doc_id, "hidden")
+            self.drain_consumers()
             return True
 
     def unhide_document(self, doc_id: str, actor: str = "local") -> bool:
@@ -277,8 +307,14 @@ class KnowledgeBase:
             meta.status = "active"
             self.governance.upsert_meta(meta)
             self._doc_store.set_status(doc_id, "active")
-            self.governance.emit_event(doc_id, "unhide")
+            self.governance.emit_event(
+                doc_id,
+                "unhide",
+                {"collection": doc.collection, "status": "active"},
+            )
             self.governance.record_audit("document.unhide", doc_id, actor=actor)
+            self._sync_chunk_status(doc.collection, doc_id, "active")
+            self.drain_consumers()
             return True
 
     def vision_status(self) -> dict[str, Any]:
@@ -299,10 +335,31 @@ class KnowledgeBase:
 
         未完成的替换回到写入前的文档；没有父文档的向量会被删除；
         已标记待清理的旧文档会被删掉。没有快照的缺向量文档记在
-        ``vectorless`` 中，便于告警。
+        ``vectorless`` 中，便于告警。随后消化 doc_events 里还没被
+        向量消费者处理的 hide / unhide / delete。
         """
         with self._lock:
-            return self._indexer.repair()
+            report = self._indexer.repair()
+            report["consumers"] = self.drain_consumers()
+            return report
+
+    def drain_consumers(self) -> dict[str, Any]:
+        """推进已实现的消费者。mentions / items / reports 只出现在 residual 里。"""
+        return drain_consumers(self.governance, [self._vector_consumer])
+
+    def _sync_chunk_status(self, collection: str, doc_id: str, status: str) -> None:
+        try:
+            sync_chunk_governance(
+                self._vector_store,
+                collection or self.settings.default_collection,
+                doc_id,
+                status=status,
+            )
+        except Exception as exc:
+            logger.exception("文档 %s 的向量状态未能写成 %s", doc_id, status)
+            raise KBError(
+                f"文档 {doc_id} 的库内状态已更新，但向量元数据未能同步为 {status}: {exc}"
+            ) from exc
 
     def collections(self) -> list[str]:
         return self._vector_store.collections()
@@ -335,22 +392,43 @@ class KnowledgeBase:
         return self.governance.list_audit(after_id, limit)
 
     def backfill_governance(self, actor: str = "local") -> int:
-        """为旧文档补充 docs_meta（缺失时按文档字段生成）。"""
+        """为旧文档补充 docs_meta，并把 scope/status 写回已有切块。
+
+        默认检索的向量 where 要求切块带 status=active 和 scope。
+        升级前入库、元数据缺这两项的切块不会被搜到，跑一次本命令补上。
+        返回新建的 docs_meta 条数；向量同步记在审计明细里。
+        """
         created = 0
+        synced = 0
         for doc in self._doc_store.list():
-            if self.governance.get_meta(doc.doc_id) is None:
-                self.governance.upsert_meta(
-                    DocMeta(
-                        doc_id=doc.doc_id,
-                        content_hash=doc.content_hash,
-                        scope=doc.scope,
-                        status=doc.status,
-                    )
+            meta = self.governance.get_meta(doc.doc_id)
+            if meta is None:
+                meta = DocMeta(
+                    doc_id=doc.doc_id,
+                    content_hash=doc.content_hash,
+                    scope=doc.scope,
+                    status=doc.status,
                 )
+                self.governance.upsert_meta(meta)
                 created += 1
-        if created:
+            scope, status = _stricter_visibility(doc.scope, doc.status, meta.scope, meta.status)
+            try:
+                synced += sync_chunk_governance(
+                    self._vector_store,
+                    doc.collection or self.settings.default_collection,
+                    doc.doc_id,
+                    scope=scope,
+                    status=status,
+                )
+            except Exception:
+                logger.warning(
+                    "回填文档 %s 的向量 scope/status 失败", doc.doc_id, exc_info=True
+                )
+        if created or synced:
             self.governance.record_audit(
-                "governance.backfill", actor=actor, detail={"created": created}
+                "governance.backfill",
+                actor=actor,
+                detail={"created": created, "vectors_synced": synced},
             )
         return created
 

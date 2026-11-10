@@ -38,6 +38,78 @@ def test_reranker_fallback_order(monkeypatch):
     r = Reranker("does-not-exist-model", enabled=True)
     out = r.rerank("q", hits, top_k=1)
     assert out[0].chunk_id == "a"  # 加载失败 → 降级原排序
+    assert out[0].score == 0.9
+    assert out[0].rerank_score is None
+    assert out[0].rerank_error and "model load failed" in out[0].rerank_error
+
+
+class _Scores:
+    def __init__(self, values):
+        self._values = list(values)
+
+    def tolist(self):
+        return list(self._values)
+
+
+class Sigmoid:
+    """名字必须是 Sigmoid，和 torch.nn.Sigmoid 一样。"""
+
+
+class Identity:
+    pass
+
+
+def _fake_cross_encoder(raw, **attrs):
+    class Model:
+        def predict(self, pairs):
+            return _Scores(raw)
+
+    for name, value in attrs.items():
+        setattr(Model, name, value)
+    return Model()
+
+
+def _rerank_one(model, vector_score=0.42):
+    reranker = Reranker("unused", enabled=True)
+    reranker._lazy = lambda: model
+    hit = RetrievalHit(chunk_id="a", doc_id="A", text="x", score=vector_score)
+    return reranker.rerank("q", [hit], top_k=1)[0]
+
+
+def test_st4_activation_fn_probability_is_not_sigmoided_again():
+    model = _fake_cross_encoder([0.0], activation_fn=Sigmoid())
+    hit = _rerank_one(model)
+    assert hit.rerank_score == 0.0
+    assert hit.rerank_error is None
+
+
+def test_st3_default_activation_function_probability_is_not_sigmoided_again():
+    model = _fake_cross_encoder([0.3319], default_activation_function=Sigmoid())
+    hit = _rerank_one(model)
+    assert hit.rerank_score == 0.3319
+    assert hit.rerank_error is None
+
+
+def test_explicit_logit_activation_is_sigmoided_once():
+    from kbagent.retrieval.reranker import stable_sigmoid
+
+    zero = _rerank_one(_fake_cross_encoder([0.0], activation_fn=Identity()))
+    assert zero.rerank_score == stable_sigmoid(0.0) == 0.5
+    assert zero.rerank_score != stable_sigmoid(0.5)
+
+    huge = _rerank_one(_fake_cross_encoder([-1000.0], default_activation_function=Identity()))
+    assert huge.rerank_score == 0.0
+    assert huge.rerank_error is None
+
+
+def test_missing_activation_attribute_does_not_sigmoid_probabilities():
+    """两个属性都没有时，[0, 1] 的 predict 原样留下，不能再变成 sigmoid(0)=0.5。"""
+    hit = _rerank_one(_fake_cross_encoder([0.0]))
+    assert hit.rerank_score == 0.0
+    assert hit.rerank_error is None
+
+    outside = _rerank_one(_fake_cross_encoder([-1000.0]))
+    assert outside.rerank_score == 0.0
 
 
 def test_reranker_disabled():
@@ -109,6 +181,8 @@ def test_media_in_retrieval_hit(kb):
         [{
             "doc_id": "doc9",
             "title": "图",
+            "scope": "default",
+            "status": "active",
             "media_type": "image",
             "image_path": "/tmp/img.png",
             "page": 1,

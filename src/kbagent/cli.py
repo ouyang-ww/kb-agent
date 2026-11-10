@@ -237,9 +237,17 @@ def audit_log(
     typer.echo(json.dumps(kb.list_audit(after, limit), ensure_ascii=False, indent=2))
 
 
+@governance_app.command("drain")
+def governance_drain():
+    """消化 doc_events。目前只有 vector_index；其余消费者列在 residual。"""
+    kb = _kb()
+    report = kb.drain_consumers()
+    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+
+
 @governance_app.command("backfill")
 def governance_backfill():
-    """为旧文档补充 docs_meta（缺失时按文档字段生成）。"""
+    """为旧文档补充 docs_meta，并把 scope/status 写回已有切块。"""
     kb = _kb()
     created = kb.backfill_governance()
     typer.echo(f"已补充 {created} 条 docs_meta")
@@ -382,7 +390,7 @@ def chat():
 @app.command()
 def eval(
     dataset: str = typer.Option("eval/datasets/baseline.jsonl", help="评测集路径"),
-    mode: str = typer.Option("full", help="retrieval | full"),
+    mode: str = typer.Option("full", help="retrieval | full | refusal"),
     top_k: int = typer.Option(None),
     collection: Optional[str] = typer.Option(None),
     no_rerank: bool = typer.Option(False),
@@ -390,7 +398,14 @@ def eval(
     compare: Optional[str] = typer.Option(None, help="对比实验，如: rerank=on,off;top_k=3,5"),
     output: Optional[str] = typer.Option(None, help="报告输出路径（目录）"),
 ):
-    """运行评估：输出 recall@k / accuracy / faithfulness 等指标。"""
+    """运行评估：输出 recall@k / accuracy / faithfulness，或库外集的 refusal_recall。
+
+    ``refusal`` 不调用裁判。没有 LLM key 时，低于可答阈值的拒答仍然计入；
+    检索分够高但生成失败时，该条不算拒答。
+    """
+    if mode not in {"retrieval", "full", "refusal"}:
+        typer.echo("mode 只能是 retrieval、full 或 refusal", err=True)
+        raise typer.Exit(1)
     kb = _kb()
     items = load_dataset(dataset)
     if not items:

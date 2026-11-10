@@ -76,6 +76,15 @@ def test_compile_chroma():
     }
 
 
+def test_and_where_combines_tag_and_status():
+    from kbagent.storage.filters import and_where
+
+    merged = and_where({"tag": "food"}, eq("status", "active"))
+    compiled = compile_chroma(merged)
+    assert {"tag": "food"} in compiled["$and"]
+    assert {"status": "active"} in compiled["$and"]
+
+
 def test_compile_chroma_or():
     assert compile_chroma(any_of(eq("tag", "a"), eq("tag", "b"))) == {
         "$or": [{"tag": "a"}, {"tag": "b"}]

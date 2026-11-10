@@ -159,6 +159,10 @@ class RetrievalHit:
     collection: str = ""
     char_start: int | None = None
     char_end: int | None = None
+    # 重排成功后写入，刻度与 KB_ANSWER_RERANK_TAU_* 相同（bge-reranker 的 predict 已是概率）。
+    rerank_score: float | None = None
+    # 调用方要求重排但模型没跑成。此时 rerank_score 为空，闸门用的是向量分。
+    rerank_error: str | None = None
 
 
 @dataclass

@@ -56,6 +56,13 @@ def test_aggregate():
     assert agg["mrr"] == 0.5  # (1 + 0) / 2
 
 
+def test_refusal_recall():
+    from kbagent.eval.metrics import refusal_recall
+
+    assert refusal_recall([]) == 0.0
+    assert refusal_recall([True, True, False, True]) == 0.75
+
+
 def test_aggregate_empty():
     agg = aggregate([], k=3)
     assert agg["recall@3"] == 0.0

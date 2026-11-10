@@ -48,6 +48,13 @@ def ndcg_at_k(relevant: set[str], retrieved: list[str], k: int) -> float:
     return dcg / idcg if idcg > 0 else 0.0
 
 
+def refusal_recall(refused: list[bool]) -> float:
+    """应拒答样本里真正拒答的比例。空集返回 0。"""
+    if not refused:
+        return 0.0
+    return sum(1.0 for flag in refused if flag) / len(refused)
+
+
 def aggregate(items: list[dict], k: int) -> dict:
     """对每条 {relevant_doc_ids, retrieved_doc_ids} 聚合平均指标。"""
     n = len(items)

@@ -14,6 +14,7 @@ class EvalItem:
     relevant_doc_ids: list[str] = field(default_factory=list)
     category: str = ""
     image_required: bool = False
+    should_refuse: bool = False
 
 
 def load_dataset(path: str | Path) -> list[EvalItem]:
@@ -32,6 +33,7 @@ def load_dataset(path: str | Path) -> list[EvalItem]:
                     relevant_doc_ids=list(obj.get("relevant_doc_ids", [])),
                     category=obj.get("category", ""),
                     image_required=bool(obj.get("image_required", False)),
+                    should_refuse=bool(obj.get("should_refuse", False)),
                 )
             )
     return items

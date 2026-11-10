@@ -86,6 +86,13 @@ class VectorStore(Protocol):
         include_embeddings: bool = False,
     ) -> list[StoredVector]: ...
 
+    def update_metadata(
+        self,
+        collection: str,
+        ids: list[str],
+        metadatas: list[dict[str, Any]],
+    ) -> None: ...
+
     def count(self, collection: str) -> int: ...
 
     def collections(self) -> list[str]: ...

@@ -6,8 +6,10 @@ import logging
 from typing import Callable
 
 from ..config import Settings
+from ..errors import KBError
+from ..governance.scope import visibility_filter, visibility_is_enforced
 from ..models import MediaRef, RetrievalHit
-from ..storage.filters import Where
+from ..storage.filters import Where, and_where
 from ..vectorstore.base import VectorHit, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -48,10 +50,13 @@ class Retriever:
         include_hidden: bool = False,
     ) -> list[RetrievalHit]:
         collection = collection or self.settings.default_collection
+        # 不带过滤器时补上 scope/status，补不上就拒绝，不能静默搜全库。
+        # include_hidden=True 是唯一的显式旁路。
+        where = self._scoped_where(where, include_hidden)
         qv = self.embedder.embed_query(query)
-        # 可见性以文档行和治理元数据为准，不靠向量 metadata 的 scope/status。
-        # hide 不回写向量；若把 status 写进 where，再入库会把隐藏洗回可见。
-        # 近邻大量隐藏时，固定 top_k*3 会把后面的可见结果截掉，所以窗口会扩大。
+        # 向量 where 先排除 hidden/private，避免它们占满近邻。
+        # 文档行和治理元数据是第二道：切块状态过期时仍然丢掉不可见命中。
+        # 近邻里还有过期隐藏块时，窗口会继续扩大，直到凑满可见结果。
         if not include_hidden and self.doc_visibility is not None and top_k > 0:
             results = self._query_visible(collection, qv, top_k, where)
         else:
@@ -76,6 +81,18 @@ class Retriever:
                 )
             )
         return hits
+
+    def _scoped_where(self, where: Where, include_hidden: bool) -> Where:
+        if include_hidden:
+            return where
+        merged = and_where(where, visibility_filter(self.settings.default_scope))
+        if not visibility_is_enforced(merged):
+            raise KBError(
+                "检索缺少 scope/status 过滤，已拒绝执行。"
+                "默认检索只接受 status=active 且 scope 在允许列表里的切块；"
+                "缺 scope 或空 scope 不会返回。只有显式 include_hidden=True 可以关闭这道过滤。"
+            )
+        return merged
 
     def _is_visible_hit(self, hit: VectorHit) -> bool:
         doc_id = (hit.metadata or {}).get("doc_id", "")

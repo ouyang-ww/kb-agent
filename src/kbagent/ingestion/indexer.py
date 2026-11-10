@@ -20,6 +20,7 @@ from ..config import Settings
 from ..document_store.base import DocumentStore
 from ..errors import IngestError, NotFoundError
 from ..governance import ACTIVE_STATUS, HIDDEN_SCOPES, DocMeta, GovernanceStore
+from ..governance.vectors import sync_chunk_governance
 from ..models import (
     SOURCE_BOUND,
     SOURCE_INLINE,
@@ -606,10 +607,12 @@ class Indexer:
                 "修复日志 %s 未能关闭，请运行 kb repair", journal_id, exc_info=True
             )
 
-    def _finalize_delete(self, doc_id: str) -> None:
+    def _finalize_delete(self, doc_id: str, collection: str | None = None) -> None:
         if self.governance is not None:
             self.governance.mark_deleted(doc_id)
-            self.governance.emit_event(doc_id, "delete")
+            self.governance.emit_event(
+                doc_id, "delete", {"collection": collection or ""}
+            )
             self.governance.increment_manifest_docs(
                 self.settings.embedding_manifest, -1
             )
@@ -636,7 +639,7 @@ class Indexer:
                 logger.warning("删除文档 %s 失败，已恢复向量: %s", doc_id, exc)
             else:
                 self.vector_store.delete(collection, where=eq("doc_id", doc_id))
-                self._finalize_delete(doc_id)
+                self._finalize_delete(doc_id, collection)
                 logger.warning(
                     "删除文档 %s 的收尾失败，文档行已不在: %s", doc_id, exc
                 )
@@ -668,7 +671,7 @@ class Indexer:
             # 标记语义放在调用前：删除抛错时也尝试按快照恢复。
             self.vector_store.delete(coll, where=eq("doc_id", doc_id))
             self.doc_store.delete(doc_id)
-            self._finalize_delete(doc_id)
+            self._finalize_delete(doc_id, coll)
         except Exception as exc:
             self._compensate_delete(doc_id, coll, snapshot, journal_id, exc)
             raise
@@ -704,7 +707,12 @@ class Indexer:
             else:
                 try:
                     self.governance.emit_event(
-                        doc_id, "pending_cleanup", {"replaced_by": replaced_by}
+                        doc_id,
+                        "pending_cleanup",
+                        {
+                            "replaced_by": replaced_by,
+                            "collection": doc.collection,
+                        },
                     )
                     self.governance.record_audit(
                         "document.pending_cleanup",
@@ -720,6 +728,19 @@ class Indexer:
             meta_hidden = saved is not None and saved.status == "hidden"
 
         if row_hidden or meta_hidden:
+            # 向量 where 认切块 status。这里同步失败也不撤销文档行隐藏，
+            # 事件还在，drain / repair 可以再写一次。
+            try:
+                sync_chunk_governance(
+                    self.vector_store,
+                    doc.collection or self.settings.default_collection,
+                    doc_id,
+                    status="hidden",
+                )
+            except Exception:
+                logger.warning(
+                    "待清理文档 %s 的向量状态未能标为 hidden", doc_id, exc_info=True
+                )
             return
         raise IngestError(f"未能隐藏待清理文档 {doc_id}")
 

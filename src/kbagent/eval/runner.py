@@ -12,9 +12,10 @@ from typing import Any
 
 from ..config import Settings
 from ..errors import LLMError
+from ..generation.answerability import is_refusal_text
 from .dataset import EvalItem
 from .judge import LLMJudge
-from .metrics import aggregate
+from .metrics import aggregate, refusal_recall
 
 # 复合分权重（可配）
 DEFAULT_WEIGHTS = {
@@ -68,6 +69,14 @@ class Evaluator:
         }
         result = EvalResult(mode=mode, config=config)
         per_item: list[dict] = []
+
+        if mode == "refusal":
+            for item in items:
+                per_item.append(self._refusal_row(item, top_k, rerank, rewrite, collection))
+            result.per_item = per_item
+            result.metrics = self._aggregate(per_item, top_k, mode)
+            result.warnings = self._redlines(result.metrics, mode)
+            return result
 
         for item in items:
             row: dict[str, Any] = {
@@ -127,6 +136,40 @@ class Evaluator:
         result.warnings = self._redlines(result.metrics, mode)
         return result
 
+    def _refusal_row(
+        self,
+        item: EvalItem,
+        top_k: int,
+        rerank: bool | None,
+        rewrite: bool | None,
+        collection: str | None,
+    ) -> dict[str, Any]:
+        """库外集只看拒答，不调用裁判。没有 LLM key 时，低于 τ 的拒答仍然计入。"""
+        row: dict[str, Any] = {
+            "query": item.query,
+            "category": item.category,
+            "should_refuse": True if item.should_refuse or item.category == "out_of_kb" else False,
+            "relevant_doc_ids": item.relevant_doc_ids,
+        }
+        t0 = time.perf_counter()
+        ans = self.kb.ask(
+            item.query,
+            top_k=top_k,
+            rerank=rerank,
+            rewrite=rewrite,
+            collection=collection,
+        )
+        row["answer_latency_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        row["answer"] = ans.text
+        row["refusal_reason"] = ans.meta.get("refusal_reason")
+        row["confidence"] = ans.meta.get("confidence")
+        row["score_kind"] = ans.meta.get("score_kind")
+        row["top1_score"] = ans.meta.get("top1_score")
+        row["tau_calibrated"] = ans.meta.get("tau_calibrated")
+        row["rerank_fallback"] = bool(ans.meta.get("rerank_fallback"))
+        row["refused"] = bool(ans.meta.get("refusal_reason")) or is_refusal_text(ans.text)
+        return row
+
     # ---- 对比实验 ----
     def compare(
         self,
@@ -153,6 +196,23 @@ class Evaluator:
 
     # ---- 聚合 ----
     def _aggregate(self, per_item: list[dict], top_k: int, mode: str) -> dict[str, float]:
+        if mode == "refusal":
+            eligible = [row for row in per_item if row.get("should_refuse")]
+            if not eligible:
+                eligible = per_item
+            flags = [bool(row.get("refused")) for row in eligible]
+            metrics = {
+                "refusal_recall": round(refusal_recall(flags), 4),
+                "refused": float(sum(flags)),
+                "total": float(len(eligible)),
+            }
+            lat = [row.get("answer_latency_ms", 0) for row in per_item]
+            if lat:
+                lat_sorted = sorted(lat)
+                metrics["answer_latency_p50_ms"] = round(
+                    lat_sorted[len(lat_sorted) // 2], 1
+                )
+            return metrics
         ret_metrics = aggregate(per_item, top_k)
         metrics: dict[str, float] = {**ret_metrics}
         if mode == "full":
@@ -206,6 +266,11 @@ class Evaluator:
     @staticmethod
     def _redlines(metrics: dict[str, float], mode: str) -> list[str]:
         warnings: list[str] = []
+        if mode == "refusal":
+            val = metrics.get("refusal_recall", -1)
+            if val >= 0 and val < 0.9:
+                warnings.append(f"红线告警: refusal_recall={val} < 0.9")
+            return warnings
         if mode == "full":
             checks = [
                 ("recall@5", 0.8),

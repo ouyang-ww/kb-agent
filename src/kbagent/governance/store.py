@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS runtime_pointer (
   name TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS consumer_dead_letter (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  consumer TEXT NOT NULL,
+  event_id INTEGER NOT NULL,
+  error TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_consumer
+  ON consumer_dead_letter(consumer, event_id);
 """
 
 
@@ -241,6 +250,41 @@ class GovernanceStore:
                 (consumer,),
             ).fetchone()
         return int(row["last_event"]) if row else 0
+
+    def record_dead_letter(self, consumer: str, event_id: int, error: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO consumer_dead_letter(consumer, event_id, error, created_at)
+                VALUES (?,?,?,?)
+                """,
+                (consumer, int(event_id), error[:2000], _now()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_dead_letters(
+        self, consumer: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM consumer_dead_letter"
+        params: list[Any] = []
+        if consumer:
+            sql += " WHERE consumer = ?"
+            params.append(consumer)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "consumer": row["consumer"],
+                "event_id": row["event_id"],
+                "error": row["error"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def set_cursor(self, consumer: str, last_event: int) -> None:
         with self._lock:

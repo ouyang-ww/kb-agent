@@ -1,10 +1,10 @@
 # 知识治理：可信、可控、可演进
 
-> 状态：**设计文档 + P0 骨架已实现（2026-10-30）**。与 [PLAN v4](../PLAN.md) 配套。
+> 状态：**设计文档 + P0 骨架已实现（2026-10-30）+ P1 闸门 / 引用 / 库外集 / fail-closed scope / vector_index 消费者已落地（2026-11-10）**。与 [PLAN v4](../PLAN.md) 配套。
 > 本文的 P0 / P1 / P2 与 [status §5](./status.md) 的治理阶段同名同义。学习阶段叫 L2、S1–S4，不占用这套编号。
 > 配套：[愿景](./vision.md)、[L1→L3 最小可行闭环拆解](./mvp-l1-to-l3.md)、[知识图谱与本体学习笔记](./knowledge-graph-and-ontology.md)。
 > 覆盖五个问题：**防幻觉、隐藏与抽离、embedding 迁移、知识过期、知识重复。**
-> 实施状态：`docs_meta` / `doc_events` / `consumer_cursor` / scope 过滤 / hide-unhide / `answer_log` / `audit_log` / `embedding_manifest` / `runtime_pointer` / 只读-admin Key 分权已实现（2026-10-30）；过期/冲突检测、严格模式、去重待实现。
+> 实施状态：P0 治理表、scope、hide/unhide、日志、manifest、Key 分权已实现（2026-10-30）。P1 的闸 1、闸 2、库外拒答集、检索 fail-closed、`vector_index` 消费者已实现（2026-11-10）。`mentions` / `items` / `reports` 仍是游标占位。过期/冲突、闸 3 严格模式、近似去重待 P2。
 
 ---
 
@@ -66,9 +66,15 @@ top1_score < τ_low                  → 直接拒答
 top1_score ≥ τ_high                 → 正常回答
 ```
 
-可选叠加一个轻量 LLM 分类：`{"answerable": bool, "missing": ["缺少的要点"]}`。
+可选叠加一个轻量 LLM 分类：`{"answerable": bool, "missing": ["缺少的要点"]}`。P1 没有做这一步。
 
 **τ 必须按 embedding + rerank 模型组合校准**，换模型后重标定（见第 3 节）。
+
+**P1 已落地。** 闸门在重排之后、生成之前执行。拒答写入 `answer_log.refusal_reason` / `confidence`，是正常答案，不是异常。
+
+- `KB_ANSWER_TAU_LOW` / `KB_ANSWER_TAU_HIGH` 默认 **0.52 / 0.54**。只适用于 `BAAI/bge-small-zh-v1.5` 的向量相关度（L2 经 `1/(1+d)`），并且是对着 `examples/sample_notes` 标定的：库外 top1 最高 0.4959，基线最低 0.5440。
+- `KB_ANSWER_RERANK_TAU_LOW` / `KB_ANSWER_RERANK_TAU_HIGH` 默认 **0.50 / 0.90**。尺子是 `BAAI/bge-reranker-base` 的 `predict`。sentence-transformers 对该模型使用 Sigmoid，输出已经是概率（库外最高 0.3319，基线最低 0.9406）。闸门不再对这个数做第二次 sigmoid。重排器同时看 `activation_fn`（sentence-transformers 4.x）和 `default_activation_function`（2.7–3.x）。确认不是 Sigmoid 时才做一次数值稳定的 sigmoid。两个属性都没有、且分数已经在 [0, 1] 时，也不再 sigmoid。
+- 换嵌入模型、向量度量、重排模型或语料后，用 `eval/datasets/baseline.jsonl` 和 `eval/datasets/out_of_kb.jsonl` 重看 top1，再改 τ。上一套模型的数字不能直接搬过来。
 
 #### 闸 2：生成契约
 
@@ -90,6 +96,8 @@ Prompt 约束：
   "unsupported": ["无法从来源推出的陈述"]
 }
 ```
+
+**P1 已落地。** 提示词要求只用编号来源、事实句带 `[n]`、资料不足用固定句，正文后另起一行 `SELF_CHECK`。后检剥掉不在检索集合里的编号；全部编造或没有任何有效编号时改成固定拒答。只剥掉一部分编号时，置信度降一档。不拆原子陈述，那是闸 3。
 
 #### 闸 3：声明校验（可选，严格模式）
 
@@ -215,12 +223,13 @@ Chroma 过滤示例：
 
 ```python
 where = {"$and": [
-    {"scope": {"$ne": "private"}},
-    {"scope": {"$ne": "secret"}},
-    {"status": {"$eq": "active"}},
+    {"status": "active"},
+    {"scope": {"$in": ["default", "work"]}},
 ]}
 collection.query(query_embeddings=[vec], n_results=k, where=where)
 ```
+
+用允许列表，不用 `scope $nin private/secret`。Chroma 的 `$nin` 会命中缺字段，空 scope 也会漏过去。缺 scope 或 `scope=""` 不应出现在默认检索里。
 
 概念可见性规则：
 
@@ -278,6 +287,8 @@ kb audit --since 2026-10-01
 6. 直接调用 `retriever.search()` **不带过滤器**时，测试应该失败或强制要求传 scope 参数（防止未来某条代码路径绕过）
 
 第 6 条最重要：**让"忘记过滤"变成编译期/测试期错误**，而不是运行时漏洞。
+
+**P1 已落地。** `retriever.search()` 在没有 `include_hidden=True` 时会把 `status=active` 且 `scope $in` 允许列表并进向量 `where`。允许列表是 `default`、`work`，再加上配置的 default scope。缺 scope、空 scope、private、secret 都不会被返回。这道条件补不上就抛错，不会静默搜全库。文档行和治理元数据仍是第二道。hide / unhide 会把切块 `status` 写回去。
 
 ---
 
@@ -545,6 +556,8 @@ CREATE TABLE consumer_cursor (
 3. 失败重试 + 退避；毒事件进 `dead_letter` 表并告警
 4. `kb repair` 可从任意 cursor 重放，保证最终一致
 
+**P1 已落地的只有 `vector_index`。** 它处理 hide / unhide / delete / pending_cleanup，把切块 status 写回去或删掉向量；失败记入 `consumer_dead_letter` 后跳过，避免一条毒事件堵住后面的隐藏。`kb governance drain` 会跑它。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只保留名字，游标停在 0，等对应模块出现后再从事件头重放。向量库和 SQLite 不在同一个事务里，处理必须幂等。
+
 ### 6.3 派生数据清单
 
 | Consumer | 维护的数据 | 可重建 | 幂等键 |
@@ -586,7 +599,7 @@ CREATE TABLE audit_log (
 | 阶段 | 内容 |
 | --- | --- |
 | **P0（已完成 2026-10-30）** | `docs_meta`、`doc_events`、`consumer_cursor`、`content_hash`、scope 过滤、`embedding_manifest` + 指针、`answer_log`、`audit_log`、只读/admin Key、隐藏文档测试 ✅ |
-| **P1** | 闸 1 可答性、闸 2 引用契约、级联 consumers（vector/mentions/items/reports）、库外评测集、检索 fail-closed scope |
+| **P1（2026-11-10）** | 闸 1、闸 2、库外拒答集（`refusal_recall`）、检索 fail-closed scope、`vector_index` 消费者 ✅。`mentions` / `items` / `reports` 仍是游标占位，不在本阶段造学习模块 |
 | **P2** | 闸 3 声明校验（严格模式）、过期检测与冲突队列、近似去重、题库去重 |
 | **P3+** | 历史查询（as-of）、事实级共识、embedding 迁移演练、段落级隐藏 |
 
