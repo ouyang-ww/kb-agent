@@ -159,6 +159,8 @@ class RetrievalHit:
     collection: str = ""
     char_start: int | None = None
     char_end: int | None = None
+    # 重排成功后写入。闸 1 用它区分向量分和 rerank logit，避免混用阈值。
+    rerank_score: float | None = None
 
 
 @dataclass

@@ -1,10 +1,11 @@
-"""RAG 生成管线：意图 → 改写 → 检索 → 重排 → 父扩写 → 编号引用提示词 → LLM。
+"""RAG 生成管线：意图 → 改写 → 检索 → 重排 → 闸1 可答性 → 生成 → 闸2 引用契约。
 
 支持多模态：命中图文单元且有视觉 LLM 配置时附加图片消息；否则用描述文本。
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..config import Settings
@@ -12,15 +13,20 @@ from ..errors import LLMError
 from ..models import Answer, SourceRef
 from ..retrieval.parent_expander import ContextItem, ParentExpander
 from ..storage.filters import Where
+from .answerability import (
+    WEAK_EVIDENCE_HINT,
+    assess,
+    is_refusal_text,
+    low_score_refusal,
+)
+from .citations import (
+    CITATION_SYSTEM_PROMPT,
+    apply_citation_contract,
+    downgrade_confidence,
+)
 from .llm import LLMClient
 
-_SYSTEM_PROMPT = (
-    "你是一个个人知识库助手。请严格依据提供的参考资料回答问题。\n"
-    "要求：\n"
-    "1. 回答内容必须来自参考资料，使用 [1][2] 等编号标注引用来源（编号对应参考资料序号）。\n"
-    "2. 如果参考资料中没有足够信息回答，请直接说明\"知识库中没有相关内容\"，不要编造。\n"
-    "3. 用简洁、清晰的中文回答。\n"
-)
+logger = logging.getLogger(__name__)
 
 
 class RAGPipeline:
@@ -82,7 +88,8 @@ class RAGPipeline:
         if plan.intent == "out_of_scope":
             return Answer(
                 text="这个问题超出了我的知识库范围，我无法回答。你可以问我知识库中已收录内容相关的问题。",
-                sources=[], meta=meta,
+                sources=[],
+                meta={**meta, "confidence": "low", "refusal_reason": "out_of_scope", "answerability": "refuse"},
             )
 
         # 检索候选 → 重排 → top-k
@@ -100,13 +107,61 @@ class RAGPipeline:
             hits = candidates[:top_k]
 
         if not hits:
-            return Answer(
-                text="知识库中没有找到相关内容。",
-                sources=[], meta={**meta, "retrieved": 0},
+            return self._refuse(
+                "知识库中没有找到相关内容。",
+                [],
+                {**meta, "retrieved": 0, "confidence": "low", "refusal_reason": "no_hits", "answerability": "refuse"},
             )
 
+        decision = assess(
+            hits[0].score,
+            hits[0].rerank_score,
+            self.settings,
+        )
+        meta.update(decision.as_meta())
+        meta["retrieved"] = len(hits)
+
         context = self.parent_expander.expand(hits)
-        sources = [
+        sources = self._sources(context)
+        meta["expanded"] = len(context)
+
+        if decision.action == "refuse":
+            title = context[0].title if context else hits[0].title
+            return self._refuse(low_score_refusal(title), sources, meta)
+
+        try:
+            answer_text = self._generate(plan.rewritten_query, context)
+        except LLMError:
+            # LLM 不可用 → 降级返回检索到的资料摘要。摘要自带编号，引用后检能通过。
+            digest = "\n\n".join(
+                f"[{i + 1}] {c.title}\n{c.text[:300]}" for i, c in enumerate(context)
+            )
+            answer_text = (
+                "⚠️ 无法生成回答（LLM 调用失败，请检查 KB_LLM_API_KEY / KB_LLM_BASE_URL 配置）。\n\n"
+                f"以下为检索到的相关资料：\n\n{digest}"
+            )
+            meta["llm_error"] = True
+
+        checked = apply_citation_contract(answer_text, len(context))
+        meta["citation_check"] = checked.as_meta()
+        if checked.forced_refusal:
+            meta["confidence"] = "low"
+            meta["refusal_reason"] = "invalid_citations"
+            meta["answerability"] = "refuse"
+            return self._refuse(checked.text, sources, meta)
+
+        text = checked.text
+        meta["confidence"] = downgrade_confidence(
+            decision.confidence, checked.confidence_steps
+        )
+        if decision.action == "weak" and not is_refusal_text(text):
+            text = f"{text}\n\n{WEAK_EVIDENCE_HINT}"
+            meta["confidence"] = "low"
+        meta["refusal_reason"] = None
+        return Answer(text=text, sources=sources, meta=meta)
+
+    def _sources(self, context: list[ContextItem]) -> list[SourceRef]:
+        return [
             SourceRef(
                 doc_id=c.doc_id,
                 title=c.title,
@@ -119,22 +174,16 @@ class RAGPipeline:
             for c in context
         ]
 
-        try:
-            answer_text = self._generate(plan.rewritten_query, context)
-        except LLMError:
-            # LLM 不可用 → 降级返回检索到的资料摘要
-            digest = "\n\n".join(
-                f"[{i + 1}] {c.title}\n{c.text[:300]}" for i, c in enumerate(context)
-            )
-            answer_text = (
-                "⚠️ 无法生成回答（LLM 调用失败，请检查 KB_LLM_API_KEY / KB_LLM_BASE_URL 配置）。\n\n"
-                f"以下为检索到的相关资料：\n\n{digest}"
-            )
-        return Answer(
-            text=answer_text,
-            sources=sources,
-            meta={**meta, "retrieved": len(hits), "expanded": len(context)},
+    def _refuse(self, text: str, sources: list[SourceRef], meta: dict[str, Any]) -> Answer:
+        """拒答是正常输出：记原因和置信度，不抛异常。"""
+        logger.info(
+            "拒答 reason=%s confidence=%s top1=%s kind=%s",
+            meta.get("refusal_reason"),
+            meta.get("confidence"),
+            meta.get("top1_score"),
+            meta.get("score_kind"),
         )
+        return Answer(text=text, sources=sources, meta=meta)
 
     # ---- 生成 ----
     def _generate(self, query: str, context: list[ContextItem]) -> str:
@@ -143,7 +192,9 @@ class RAGPipeline:
         )
         user_text = (
             f"参考资料：\n{context_block}\n\n问题：{query}\n\n"
-            "请结合参考资料作答，并用 [n] 标注引用来源。"
+            "请只根据上述编号资料作答，每个事实句用 [n] 标注。"
+            "不得引入资料之外的事实。资料不足时只回答固定拒答句，"
+            "并在最后一行输出 SELF_CHECK JSON。"
         )
 
         # 多模态：命中图文单元且有视觉模型配置时，附加图片
@@ -163,7 +214,7 @@ class RAGPipeline:
                 pass  # 视觉失败 → 降级为纯文本（描述已在上下文里）
 
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": CITATION_SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
         ]
         return self.llm.chat(messages)

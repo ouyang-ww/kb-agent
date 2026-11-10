@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +44,40 @@ class Settings(BaseSettings):
             raise ValueError("KB_MAX_CONCURRENT_UPLOADS 必须大于 0")
         return int(v)
 
+    @field_validator("answer_tau_low", "answer_tau_high")
+    @classmethod
+    def _check_tau(cls, v: float) -> float:
+        number = float(v)
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError("可答性阈值必须是有限数")
+        return number
+
+    @field_validator("answer_rerank_tau_low", "answer_rerank_tau_high")
+    @classmethod
+    def _check_rerank_tau(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        number = float(v)
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError("重排可答性阈值必须是有限数")
+        return number
+
+    @model_validator(mode="after")
+    def _tau_order(self):
+        if self.answer_tau_low > self.answer_tau_high:
+            raise ValueError("KB_ANSWER_TAU_LOW 不能高于 KB_ANSWER_TAU_HIGH")
+        low = self.answer_rerank_tau_low
+        high = self.answer_rerank_tau_high
+        if (low is None) ^ (high is None):
+            raise ValueError(
+                "KB_ANSWER_RERANK_TAU_LOW 和 KB_ANSWER_RERANK_TAU_HIGH 必须同时设置"
+            )
+        if low is not None and high is not None and low > high:
+            raise ValueError(
+                "KB_ANSWER_RERANK_TAU_LOW 不能高于 KB_ANSWER_RERANK_TAU_HIGH"
+            )
+        return self
+
     # ---- 存储 ----
     storage_dir: Path = Path.home() / ".kbagent"
     default_collection: str = "personal"
@@ -73,6 +107,19 @@ class Settings(BaseSettings):
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_candidates: int = 20
     top_k: int = 5
+
+    # ---- 闸 1：可答性 ----
+    # 默认 τ 只适用于向量相关度：L2 距离经 1/(1+d) 折到 (0, 1]。
+    # 起始刻度按 BAAI/bge-small-zh-v1.5 配这个折算来写，不是通用常数。
+    # 换嵌入模型、换度量，或重排模型换了，都要重标。见 docs/status.md。
+    answerability_enabled: bool = True
+    answer_tau_low: float = 0.45
+    answer_tau_high: float = 0.62
+    # 重排 logit 的单独阈值。两个都留空时，闸门把 logit 做 sigmoid 再套上面的向量 τ，
+    # 并在答案 meta 里标 score_kind=rerank_sigmoid、tau_calibrated=false。
+    # 那只是占位。标定之后把这两个值设上，闸门就直接比较原始 rerank 分。
+    answer_rerank_tau_low: float | None = None
+    answer_rerank_tau_high: float | None = None
 
     # ---- 意图识别 / 查询改写 ----
     intent_enabled: bool = True

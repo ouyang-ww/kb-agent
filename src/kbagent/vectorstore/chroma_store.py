@@ -38,6 +38,17 @@ SHARED_CHROMA_REPAIR_NOTICE = (
 )
 
 
+def _plain_metadata(meta: dict[str, Any] | None) -> dict[str, Any]:
+    """Chroma 元数据只接受标量。去掉 None，numpy 标量收成 Python 值。"""
+    out: dict[str, Any] = {}
+    for key, value in (meta or {}).items():
+        if isinstance(value, bool) or isinstance(value, (str, int, float)):
+            out[key] = value
+        elif hasattr(value, "item"):
+            out[key] = value.item()
+    return out
+
+
 def _embedding_list(raw: Any) -> list[float] | None:
     """把 Chroma 返回的 ndarray / 序列收成普通 float 列表。"""
     if raw is None:
@@ -221,6 +232,22 @@ class ChromaStore:
                 )
             )
         return out
+
+    def update_metadata(
+        self,
+        collection: str,
+        ids: list[str],
+        metadatas: list[dict[str, Any]],
+    ) -> None:
+        """只改元数据，不重新嵌入。hide / unhide 用来把 status 写回切块。"""
+        if not ids:
+            return
+        if len(ids) != len(metadatas):
+            raise KBError("update_metadata 的 ids 与 metadatas 长度不一致")
+        cleaned = [_plain_metadata(meta) for meta in metadatas]
+        with self._lock:
+            self._coll(collection).update(ids=ids, metadatas=cleaned)
+            self._remember()
 
     def delete(
         self,

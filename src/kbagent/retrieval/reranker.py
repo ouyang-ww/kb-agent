@@ -37,6 +37,7 @@ class Reranker:
             out: list[RetrievalHit] = []
             for h, s in ranked:
                 h.score = float(s)
+                h.rerank_score = float(s)
                 out.append(h)
             return out[:top_k]
         except Exception:

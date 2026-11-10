@@ -109,6 +109,8 @@ def test_media_in_retrieval_hit(kb):
         [{
             "doc_id": "doc9",
             "title": "图",
+            "scope": "default",
+            "status": "active",
             "media_type": "image",
             "image_path": "/tmp/img.png",
             "page": 1,
