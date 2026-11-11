@@ -39,6 +39,7 @@ class ContextItem:
     score: float = 0.0
     chunk_id: str = ""
     media: MediaRef | None = field(default=None)
+    note: str = ""
 
 
 class ParentExpander:
@@ -71,6 +72,7 @@ class ParentExpander:
                     score=hit.score,
                     chunk_id=hit.chunk_id,
                     media=hit.media,
+                    note=hit.note,
                 )
             )
         return items

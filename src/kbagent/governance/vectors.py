@@ -32,13 +32,20 @@ def sync_chunk_governance(
     *,
     status: str | None = None,
     scope: str | None = None,
+    valid_until: int | str | None = None,
+    fill_open_validity: bool = False,
 ) -> int:
-    """按 doc_id 更新切块的 status / scope。没变化的切块不写。
+    """按 doc_id 更新切块的 status / scope / valid_until。没变化的切块不写。
 
-    返回实际更新的条数。向量库没有 ``update_metadata`` 时抛错，
-    不能假装已经同步。
+    ``fill_open_validity`` 只在切块还没有 ``valid_until`` 时写成开放哨兵，
+    避免把已经写过的截止日期盖掉。返回实际更新的条数。向量库没有
+    ``update_metadata`` 时抛错，不能假装已经同步。
     """
-    if not doc_id or (status is None and scope is None):
+    from .validity import OPEN_ENDED_ORD
+
+    if not doc_id or (
+        status is None and scope is None and valid_until is None and not fill_open_validity
+    ):
         return 0
     rows = vector_store.get(collection, where=eq("doc_id", doc_id))
     ids: list[str] = []
@@ -52,6 +59,12 @@ def sync_chunk_governance(
             changed = True
         if scope is not None and meta.get("scope") != scope:
             meta["scope"] = scope
+            changed = True
+        if valid_until and meta.get("valid_until") != valid_until:
+            meta["valid_until"] = valid_until
+            changed = True
+        elif fill_open_validity and not meta.get("valid_until"):
+            meta["valid_until"] = OPEN_ENDED_ORD
             changed = True
         if not changed:
             continue

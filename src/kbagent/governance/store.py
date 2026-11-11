@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS docs_meta (
   valid_from TEXT,
   valid_until TEXT,
   review_by TEXT,
+  last_verified TEXT,
+  simhash TEXT,
   exclude_from_learning INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
@@ -54,7 +56,8 @@ CREATE TABLE IF NOT EXISTS answer_log (
   confidence TEXT,
   refusal_reason TEXT,
   latency_ms INTEGER,
-  feedback INTEGER
+  feedback INTEGER,
+  verification_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_answer_log_ts ON answer_log(ts);
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -92,11 +95,40 @@ CREATE TABLE IF NOT EXISTS consumer_dead_letter (
 );
 CREATE INDEX IF NOT EXISTS idx_dead_letter_consumer
   ON consumer_dead_letter(consumer, event_id);
+CREATE TABLE IF NOT EXISTS doc_relations (
+  src_id     TEXT NOT NULL,
+  dst_id     TEXT NOT NULL,
+  type       TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 1.0,
+  created_by TEXT DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (src_id, dst_id, type)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_status ON doc_relations(status, type);
+CREATE TABLE IF NOT EXISTS near_duplicates (
+  kind         TEXT NOT NULL,
+  source_id    TEXT NOT NULL,
+  duplicate_of TEXT NOT NULL,
+  method       TEXT NOT NULL,
+  score        REAL,
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (kind, source_id)
+);
 """
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _loads(raw: str | None) -> Any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 @dataclass
@@ -109,6 +141,8 @@ class DocMeta:
     valid_from: str | None = None
     valid_until: str | None = None
     review_by: str | None = None
+    last_verified: str | None = None
+    simhash: str | None = None
     exclude_from_learning: bool = False
     updated_at: str = field(default_factory=_now)
 
@@ -124,7 +158,20 @@ class GovernanceStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """旧库补列。CREATE TABLE IF NOT EXISTS 不会给已有表加字段。"""
+        self._ensure_column("docs_meta", "last_verified", "TEXT")
+        self._ensure_column("docs_meta", "simhash", "TEXT")
+        self._ensure_column("answer_log", "verification_json", "TEXT")
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        names = {row["name"] for row in rows}
+        if column not in names:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     # ---- docs_meta ----
     def upsert_meta(self, meta: DocMeta) -> None:
@@ -133,9 +180,9 @@ class GovernanceStore:
                 """
                 INSERT INTO docs_meta(
                   doc_id, content_hash, scope, status, authority,
-                  valid_from, valid_until, review_by,
+                  valid_from, valid_until, review_by, last_verified, simhash,
                   exclude_from_learning, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(doc_id) DO UPDATE SET
                   content_hash=excluded.content_hash,
                   scope=excluded.scope,
@@ -144,6 +191,8 @@ class GovernanceStore:
                   valid_from=excluded.valid_from,
                   valid_until=excluded.valid_until,
                   review_by=excluded.review_by,
+                  last_verified=excluded.last_verified,
+                  simhash=excluded.simhash,
                   exclude_from_learning=excluded.exclude_from_learning,
                   updated_at=excluded.updated_at
                 """,
@@ -156,6 +205,8 @@ class GovernanceStore:
                     meta.valid_from,
                     meta.valid_until,
                     meta.review_by,
+                    meta.last_verified,
+                    meta.simhash,
                     int(meta.exclude_from_learning),
                     meta.updated_at,
                 ),
@@ -180,6 +231,8 @@ class GovernanceStore:
             valid_from=row["valid_from"],
             valid_until=row["valid_until"],
             review_by=row["review_by"],
+            last_verified=row["last_verified"] if "last_verified" in row.keys() else None,
+            simhash=row["simhash"] if "simhash" in row.keys() else None,
             exclude_from_learning=bool(row["exclude_from_learning"]),
             updated_at=row["updated_at"],
         )
@@ -309,6 +362,7 @@ class GovernanceStore:
         confidence: str | None = None,
         refusal_reason: str | None = None,
         latency_ms: int | None = None,
+        verification: dict[str, Any] | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
@@ -316,8 +370,8 @@ class GovernanceStore:
                 INSERT INTO answer_log(
                   ts, query, rewritten_query, retrieved_json,
                   answer, citations_json, meta_json, confidence,
-                  refusal_reason, latency_ms
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                  refusal_reason, latency_ms, verification_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     _now(),
@@ -330,6 +384,7 @@ class GovernanceStore:
                     confidence,
                     refusal_reason,
                     latency_ms,
+                    json.dumps(verification, ensure_ascii=False) if verification is not None else None,
                 ),
             )
             self._conn.commit()
@@ -355,6 +410,9 @@ class GovernanceStore:
                 "refusal_reason": row["refusal_reason"],
                 "latency_ms": row["latency_ms"],
                 "feedback": row["feedback"],
+                "verification": _loads(row["verification_json"])
+                if "verification_json" in row.keys() and row["verification_json"]
+                else None,
             }
             for row in rows
         ]
@@ -488,6 +546,197 @@ class GovernanceStore:
             ).fetchone()
         return row["value"] if row else None
 
+    # ---- 关系：pending 不生效，确认后才改状态 ----
+    def propose_relation(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+        *,
+        confidence: float = 1.0,
+        created_by: str = "hook",
+    ) -> dict[str, Any] | None:
+        """写入 pending。已经确认或拒绝的同一三元组不降级、不重开。"""
+        if not src_id or not dst_id or src_id == dst_id:
+            return None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO doc_relations(
+                  src_id, dst_id, type, confidence, created_by, status, created_at
+                ) VALUES (?,?,?,?,?,'pending',?)
+                ON CONFLICT(src_id, dst_id, type) DO UPDATE SET
+                  confidence=excluded.confidence,
+                  created_by=excluded.created_by
+                WHERE doc_relations.status = 'pending'
+                """,
+                (src_id, dst_id, rel_type, float(confidence), created_by, _now()),
+            )
+            self._conn.commit()
+        return self.get_relation(src_id, dst_id, rel_type)
+
+    def get_relation(self, src_id: str, dst_id: str, rel_type: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM doc_relations
+                WHERE src_id = ? AND dst_id = ? AND type = ?
+                """,
+                (src_id, dst_id, rel_type),
+            ).fetchone()
+        return _relation_row(row) if row else None
+
+    def list_relations(
+        self,
+        *,
+        status: str | None = None,
+        rel_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM doc_relations WHERE 1=1"
+        params: list[Any] = []
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if rel_type:
+            sql += " AND type = ?"
+            params.append(rel_type)
+        sql += " ORDER BY created_at, src_id LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_relation_row(row) for row in rows]
+
+    def set_relation_status(
+        self, src_id: str, dst_id: str, rel_type: str, status: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE doc_relations SET status = ?
+                WHERE src_id = ? AND dst_id = ? AND type = ?
+                """,
+                (status, src_id, dst_id, rel_type),
+            )
+            self._conn.commit()
+            if cur.rowcount == 0:
+                return None
+        return self.get_relation(src_id, dst_id, rel_type)
+
+    def confirmed_successor(self, doc_id: str) -> str | None:
+        """谁已确认取代了这篇。多条时取得分高、写入晚的那条。"""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT src_id FROM doc_relations
+                WHERE dst_id = ? AND type = 'supersedes' AND status = 'confirmed'
+                ORDER BY confidence DESC, created_at DESC
+                LIMIT 1
+                """,
+                (doc_id,),
+            ).fetchone()
+        return row["src_id"] if row else None
+
+    def latest_doc(self, doc_id: str) -> str:
+        seen: set[str] = set()
+        current = doc_id
+        while current and current not in seen:
+            seen.add(current)
+            nxt = self.confirmed_successor(current)
+            if not nxt or nxt == current:
+                return current
+            current = nxt
+        return current or doc_id
+
+    def confirmed_contradictions(self, doc_id: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT src_id, dst_id FROM doc_relations
+                WHERE status = 'confirmed' AND type = 'contradicts'
+                  AND (src_id = ? OR dst_id = ?)
+                """,
+                (doc_id, doc_id),
+            ).fetchall()
+        others: list[str] = []
+        for row in rows:
+            other = row["dst_id"] if row["src_id"] == doc_id else row["src_id"]
+            if other and other not in others:
+                others.append(other)
+        return others
+
+    def iter_simhashes(self) -> list[tuple[str, str, str | None]]:
+        """活跃文档的 (doc_id, simhash, valid_until)。隐藏和已删除的不参与近似去重。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT doc_id, simhash, valid_until FROM docs_meta
+                WHERE status = 'active' AND simhash IS NOT NULL AND simhash != ''
+                """
+            ).fetchall()
+        return [(row["doc_id"], row["simhash"], row["valid_until"]) for row in rows]
+
+    # ---- 近似重复映射。不是合并，只记录 duplicate_of ----
+    def record_near_duplicate(
+        self,
+        kind: str,
+        source_id: str,
+        duplicate_of: str,
+        method: str,
+        score: float | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO near_duplicates(
+                  kind, source_id, duplicate_of, method, score, created_at
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(kind, source_id) DO UPDATE SET
+                  duplicate_of=excluded.duplicate_of,
+                  method=excluded.method,
+                  score=excluded.score,
+                  created_at=excluded.created_at
+                """,
+                (kind, source_id, duplicate_of, method, score, _now()),
+            )
+            self._conn.commit()
+
+    def list_near_duplicates(
+        self, *, kind: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM near_duplicates"
+        params: list[Any] = []
+        if kind:
+            sql += " WHERE kind = ?"
+            params.append(kind)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "kind": row["kind"],
+                "source_id": row["source_id"],
+                "duplicate_of": row["duplicate_of"],
+                "method": row["method"],
+                "score": row["score"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _relation_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "src_id": row["src_id"],
+        "dst_id": row["dst_id"],
+        "type": row["type"],
+        "confidence": row["confidence"],
+        "created_by": row["created_by"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+    }

@@ -183,6 +183,7 @@ def test_media_in_retrieval_hit(kb):
             "title": "图",
             "scope": "default",
             "status": "active",
+            "valid_until": 99991231,
             "media_type": "image",
             "image_path": "/tmp/img.png",
             "page": 1,
@@ -232,7 +233,7 @@ def _hit(chunk_id: str, doc_id: str, score: float):
     return VectorHit(
         id=chunk_id,
         document=doc_id,
-        metadata={"doc_id": doc_id, "title": doc_id},
+        metadata={"doc_id": doc_id, "title": doc_id, "valid_until": 99991231},
         score=score,
     )
 

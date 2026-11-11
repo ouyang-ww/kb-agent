@@ -15,6 +15,8 @@ from .config import Settings
 from .document_store.base import DocumentStore
 from .embedding.local import SentenceTransformerEmbedder
 from .errors import KBError, NotFoundError
+from .governance.validity import chunk_has_valid_until, chunk_valid_until, display_day, is_expired
+from .governance.scope import visibility_scopes
 from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
@@ -24,6 +26,7 @@ from .governance.vectors import sync_chunk_governance
 from .governance.originals import RE_INGEST_HINT, migrate_document
 from .ingestion.indexer import IngestReport, Indexer
 from .models import Answer, Document, RetrievalHit
+from .retrieval.governance_pass import RetrievalPolicy, finish_hits, shape_hits
 from .retrieval.parent_expander import ParentExpander
 from .retrieval.query_processor import QueryProcessor
 from .retrieval.reranker import Reranker
@@ -121,6 +124,7 @@ class KnowledgeBase:
             self._vector_store,
             self.settings,
             doc_visibility=self._is_doc_visible,
+            doc_dates=self._doc_dates,
         )
         self._parent_expander = ParentExpander(
             self._doc_store,
@@ -147,6 +151,7 @@ class KnowledgeBase:
             self._doc_store,
             vision_indexer=self._vision_indexer,
             governance=self.governance,
+            llm=self._llm,
         )
         self._pipeline = RAGPipeline(
             self.settings,
@@ -155,7 +160,9 @@ class KnowledgeBase:
             self._retriever,
             self._reranker,
             self._parent_expander,
+            governance=self.governance,
         )
+        self.last_text_ingest: dict[str, Any] | None = None
         self._vector_consumer = VectorIndexConsumer(
             self._vector_store, self._doc_store, self.settings
         )
@@ -190,7 +197,7 @@ class KnowledgeBase:
         scope: str | None = None,
     ) -> str | None:
         with self._lock:
-            return self._indexer.ingest_text(
+            doc_id = self._indexer.ingest_text(
                 content,
                 title=title,
                 source_path=source_path,
@@ -200,6 +207,13 @@ class KnowledgeBase:
                 force=force,
                 scope=scope,
             )
+            partial = self._indexer._partial_index
+            self.last_text_ingest = {
+                "doc_id": doc_id,
+                "ok": bool(doc_id) and partial is None,
+                "partial": dict(partial) if partial else None,
+            }
+            return doc_id
 
     def delete_document(
         self,
@@ -263,6 +277,12 @@ class KnowledgeBase:
         if meta is not None:
             return is_visible(meta)
         return doc is not None
+
+    def _doc_dates(self, doc_id: str) -> tuple[str | None, str | None]:
+        meta = self.governance.get_meta(doc_id)
+        if meta is None:
+            return None, None
+        return meta.valid_until, meta.last_verified
 
     def get_doc_meta(self, doc_id: str) -> DocMeta | None:
         return self.governance.get_meta(doc_id)
@@ -412,6 +432,8 @@ class KnowledgeBase:
                 self.governance.upsert_meta(meta)
                 created += 1
             scope, status = _stricter_visibility(doc.scope, doc.status, meta.scope, meta.status)
+            until = chunk_valid_until(meta.valid_until)
+            fill_open = meta.valid_until in (None, "")
             try:
                 synced += sync_chunk_governance(
                     self._vector_store,
@@ -419,6 +441,8 @@ class KnowledgeBase:
                     doc.doc_id,
                     scope=scope,
                     status=status,
+                    valid_until=None if fill_open else until,
+                    fill_open_validity=fill_open,
                 )
             except Exception:
                 logger.warning(
@@ -431,6 +455,181 @@ class KnowledgeBase:
                 detail={"created": created, "vectors_synced": synced},
             )
         return created
+
+    def list_relations(
+        self,
+        *,
+        status: str | None = None,
+        rel_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.governance.list_relations(status=status, rel_type=rel_type, limit=limit)
+
+    def list_near_duplicates(
+        self, *, kind: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        return self.governance.list_near_duplicates(kind=kind, limit=limit)
+
+    def latest_doc(self, doc_id: str) -> str:
+        """已确认的 supersedes 链的最新文档。pending 不改变结果。"""
+        return self.governance.latest_doc(doc_id)
+
+    def propose_relation(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+        *,
+        confidence: float = 1.0,
+        created_by: str = "user",
+    ) -> dict[str, Any] | None:
+        return self.governance.propose_relation(
+            src_id,
+            dst_id,
+            rel_type,
+            confidence=confidence,
+            created_by=created_by,
+        )
+
+    def confirm_relation(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+        actor: str = "local",
+    ) -> dict[str, Any]:
+        """确认后才生效。
+
+        ``supersedes`` / ``merged_into`` 只有在留下的那篇仍能被默认检索到时，
+        才把另一边标成 superseded。后继是 private/secret/hidden 或已过期时，
+        关系记为 confirmed，但旧文档保持 active，默认检索继续返回它。
+        """
+        row = self.governance.get_relation(src_id, dst_id, rel_type)
+        if row is None:
+            raise NotFoundError(f"关系不存在: {src_id} -{rel_type}-> {dst_id}")
+        if row["status"] == "rejected":
+            raise KBError("已拒绝的关系不能直接确认，请重新提议")
+        updated = self.governance.set_relation_status(src_id, dst_id, rel_type, "confirmed")
+        status_applied = False
+        if rel_type == "supersedes":
+            status_applied = self._supersede_if_successor_visible(src_id, dst_id)
+        elif rel_type == "merged_into":
+            status_applied = self._supersede_if_successor_visible(dst_id, src_id)
+        result = dict(updated or row)
+        if rel_type in {"supersedes", "merged_into"}:
+            result["status_applied"] = status_applied
+        self.governance.record_audit(
+            "relation.confirm",
+            f"{src_id}->{dst_id}",
+            actor=actor,
+            detail={"type": rel_type, "status_applied": status_applied},
+        )
+        self.drain_consumers()
+        return result
+
+    def _supersede_if_successor_visible(self, successor_id: str, older_id: str) -> bool:
+        """后继能被默认检索到才把旧文档标成 superseded。返回是否改了状态。"""
+        if not self._default_retrievable(successor_id):
+            logger.warning(
+                "确认取代 %s → %s，但新文档不在默认检索范围内，旧文档保持可检索",
+                successor_id,
+                older_id,
+            )
+            return False
+        self._apply_superseded(older_id, successor_id)
+        return True
+
+    def _default_retrievable(self, doc_id: str) -> bool:
+        """默认检索能否返回这篇：active、scope 在允许列表、valid_until 存在且未过期。"""
+        if not doc_id or not self._is_doc_visible(doc_id):
+            return False
+        try:
+            until, _verified = self._doc_dates(doc_id)
+        except Exception:
+            logger.warning("读取文档 %s 的时效失败，不把它当成可取代的后继", doc_id, exc_info=True)
+            return False
+        if is_expired(until):
+            return False
+        doc = self._doc_store.get(doc_id)
+        collection = (doc.collection if doc is not None else "") or self.settings.default_collection
+        try:
+            rows = self._vector_store.get(collection, where=eq("doc_id", doc_id))
+        except Exception:
+            logger.warning("读取文档 %s 的切块失败，不把它当成可取代的后继", doc_id, exc_info=True)
+            return False
+        allowed = set(visibility_scopes(self.settings.default_scope))
+        for row in rows:
+            meta = row.metadata or {}
+            if str(meta.get("status") or "") != ACTIVE_STATUS:
+                continue
+            scope = str(meta.get("scope") or "").strip()
+            if scope not in allowed:
+                continue
+            if not chunk_has_valid_until(meta.get("valid_until")):
+                continue
+            if is_expired(display_day(meta.get("valid_until"))):
+                continue
+            return True
+        return False
+
+    def reject_relation(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+        actor: str = "local",
+    ) -> dict[str, Any]:
+        row = self.governance.get_relation(src_id, dst_id, rel_type)
+        if row is None:
+            raise NotFoundError(f"关系不存在: {src_id} -{rel_type}-> {dst_id}")
+        was_confirmed = row["status"] == "confirmed"
+        updated = self.governance.set_relation_status(src_id, dst_id, rel_type, "rejected")
+        if was_confirmed and rel_type == "supersedes":
+            self._restore_if_unsuperseded(dst_id)
+        elif was_confirmed and rel_type == "merged_into":
+            self._restore_if_unsuperseded(src_id)
+        self.governance.record_audit(
+            "relation.reject",
+            f"{src_id}->{dst_id}",
+            actor=actor,
+            detail={"type": rel_type},
+        )
+        return updated or row
+
+    def _apply_superseded(self, doc_id: str, by: str) -> None:
+        doc = self._doc_store.get(doc_id)
+        if doc is None and self.governance.get_meta(doc_id) is None:
+            return
+        meta = self.governance.get_meta(doc_id) or DocMeta(doc_id=doc_id)
+        meta.status = "superseded"
+        self.governance.upsert_meta(meta)
+        collection = ""
+        if doc is not None:
+            self._doc_store.set_status(doc_id, "superseded")
+            collection = doc.collection
+            self._sync_chunk_status(collection, doc_id, "superseded")
+        self.governance.emit_event(
+            doc_id,
+            "supersede",
+            {"by": by, "collection": collection, "status": "superseded"},
+        )
+
+    def _restore_if_unsuperseded(self, doc_id: str) -> None:
+        if self.governance.confirmed_successor(doc_id):
+            return
+        meta = self.governance.get_meta(doc_id)
+        if meta is None or meta.status != "superseded":
+            return
+        if is_expired(meta.valid_until):
+            # 过期文档恢复成 active 后，默认检索仍会被 valid_until 排除。
+            pass
+        meta.status = "active"
+        self.governance.upsert_meta(meta)
+        doc = self._doc_store.get(doc_id)
+        if doc is None:
+            return
+        self._doc_store.set_status(doc_id, "active")
+        self._sync_chunk_status(doc.collection, doc_id, "active")
 
     def _stored_chunks(self, doc: Document) -> list:
         """向量库里这份文档已有的切块。迁移只用它们对齐定位。"""
@@ -488,6 +687,8 @@ class KnowledgeBase:
         rerank: bool | None = None,
         rewrite: bool | None = None,
         include_hidden: bool = False,
+        include_expired: bool = False,
+        as_of: str | None = None,
     ) -> list[RetrievalHit]:
         top_k = top_k or self.settings.top_k
         rerank_on = self.settings.rerank_enabled if rerank is None else rerank
@@ -504,18 +705,40 @@ class KnowledgeBase:
             q = plan.rewritten_query
 
         candidates_n = self.settings.rerank_candidates if rerank_on else top_k
-        hits = self._retriever.search(
+        candidates = self._retriever.search(
             q,
             top_k=max(candidates_n, 1),
             where=where,
             collection=collection,
             include_hidden=include_hidden,
+            include_expired=include_expired,
+            as_of=as_of,
+        )
+        collection_name = collection or self.settings.default_collection
+        diverse, prepared, pairs = shape_hits(
+            candidates,
+            governance=self.governance,
+            vector_store=self._vector_store,
+            collection=collection_name,
+            embedder=self._embedder,
+            top_k=top_k,
+            policy=RetrievalPolicy(
+                include_hidden=include_hidden,
+                include_expired=include_expired,
+                as_of=as_of,
+                default_scope=self.settings.default_scope,
+                doc_visible=None if include_hidden else self._is_doc_visible,
+                doc_dates=None if include_expired else self._doc_dates,
+            ),
+            cosine_threshold=float(self.settings.near_dup_cosine),
+            hamming_guard=int(self.settings.near_dup_cosine_hamming),
+            mmr_lambda=float(self.settings.mmr_lambda),
         )
         if rerank_on:
-            hits = self._reranker.rerank(q, hits, top_k=top_k)
+            hits = self._reranker.rerank(q, diverse, top_k=top_k)
         else:
-            hits = hits[:top_k]
-        return hits
+            hits = diverse[:top_k]
+        return finish_hits(hits, prepared, pairs)
 
     # ================= RAG 问答 =================
     def ask(
@@ -528,6 +751,8 @@ class KnowledgeBase:
         rewrite: bool | None = None,
         intent: bool | None = None,
         include_hidden: bool = False,
+        include_expired: bool = False,
+        as_of: str | None = None,
     ) -> Answer:
         with self._lock:
             started = time.perf_counter()
@@ -540,6 +765,8 @@ class KnowledgeBase:
                 rewrite=rewrite,
                 intent=intent,
                 include_hidden=include_hidden,
+                include_expired=include_expired,
+                as_of=as_of,
             )
             try:
                 self.governance.log_answer(
@@ -559,6 +786,7 @@ class KnowledgeBase:
                     confidence=answer.meta.get("confidence"),
                     refusal_reason=answer.meta.get("refusal_reason"),
                     latency_ms=int((time.perf_counter() - started) * 1000),
+                    verification=answer.meta.get("verification"),
                 )
             except Exception:
                 # 写日志失败不能吞掉已经生成的答案，但必须留下痕迹。

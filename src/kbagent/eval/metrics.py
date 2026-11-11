@@ -55,6 +55,65 @@ def refusal_recall(refused: list[bool]) -> float:
     return sum(1.0 for flag in refused if flag) / len(refused)
 
 
+def acknowledges_missing_points(
+    text: str, meta: dict | None, points: list[str]
+) -> bool:
+    """预期的缺失点必须出现在答案或 gaps 里。弱证据提示本身不算承认。"""
+    if not points:
+        return False
+    info = meta or {}
+    parts = [text or ""]
+    gaps = info.get("gaps") or []
+    if isinstance(gaps, list):
+        parts.extend(str(item) for item in gaps)
+    verification = info.get("verification") or {}
+    if isinstance(verification, dict):
+        extra = verification.get("gaps") or []
+        if isinstance(extra, list):
+            parts.extend(str(item) for item in extra)
+    haystack = "\n".join(parts)
+    return all(str(point) and str(point) in haystack for point in points)
+
+
+def partial_coverage_recognized(text: str, meta: dict | None = None) -> bool:
+    """答案有没有承认资料只覆盖了一部分。不调用裁判。"""
+    info = meta or {}
+    gaps = info.get("gaps") or []
+    if isinstance(gaps, list) and any(str(item).strip() for item in gaps):
+        return True
+    verification = info.get("verification") or {}
+    if isinstance(verification, dict):
+        extra = verification.get("gaps") or []
+        if isinstance(extra, list) and any(str(item).strip() for item in extra):
+            return True
+    if info.get("refusal_reason"):
+        return True
+    body = text or ""
+    markers = ("缺少", "只覆盖", "部分覆盖", "资料不足", "没有直接依据", "依据较弱")
+    return any(marker in body for marker in markers)
+
+
+def _rate(flags: list[bool]) -> float:
+    if not flags:
+        return 0.0
+    return sum(1.0 for flag in flags if flag) / len(flags)
+
+
+def conflict_presentation_rate(presented: list[bool]) -> float:
+    """答案标明存在两种说法的比例。"""
+    return _rate(presented)
+
+
+def expiry_exclusion_rate(excluded: list[bool]) -> float:
+    """默认检索没有返回过期文档的比例。"""
+    return _rate(excluded)
+
+
+def expiry_label_rate(labeled: list[bool]) -> float:
+    """显式拿出过期来源时带上时间标注的比例。"""
+    return _rate(labeled)
+
+
 def aggregate(items: list[dict], k: int) -> dict:
     """对每条 {relevant_doc_ids, retrieved_doc_ids} 聚合平均指标。"""
     n = len(items)

@@ -163,6 +163,12 @@ class RetrievalHit:
     rerank_score: float | None = None
     # 调用方要求重排但模型没跑成。此时 rerank_score 为空，闸门用的是向量分。
     rerank_error: str | None = None
+    # 切块上的时效。开放哨兵 9999-12-31 表示没有截止日期。
+    valid_until: str = ""
+    last_verified: str = ""
+    authority: int = 3
+    # 过期来源被显式使用时的时间标注。默认检索不会带上过期命中。
+    note: str = ""
 
 
 @dataclass
@@ -176,6 +182,7 @@ class SourceRef:
     snippet: str = ""
     section: str = ""
     media: MediaRef | None = None
+    note: str = ""
 
 
 @dataclass

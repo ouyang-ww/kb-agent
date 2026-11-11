@@ -98,6 +98,8 @@ def search(
     no_rerank: bool = typer.Option(False, help="关闭重排"),
     no_rewrite: bool = typer.Option(False, help="关闭查询改写"),
     include_hidden: bool = typer.Option(False, "--include-hidden", help="包含隐藏/私有文档"),
+    include_expired: bool = typer.Option(False, "--include-expired", help="包含已过期文档，并标注时间"),
+    as_of: Optional[str] = typer.Option(None, help="按 YYYY-MM-DD 判断时效。完整历史查询仍是 P3"),
 ):
     """语义检索（纯检索，不生成答案）。"""
     kb = _kb()
@@ -105,6 +107,8 @@ def search(
         query, top_k=top_k, collection=collection,
         rerank=not no_rerank, rewrite=not no_rewrite,
         include_hidden=include_hidden,
+        include_expired=include_expired,
+        as_of=as_of,
     )
     if not hits:
         typer.echo("未找到相关内容")
@@ -115,6 +119,8 @@ def search(
         if h.section:
             typer.echo(f"    章节: {h.section}")
         typer.echo(f"    {h.text[:150].replace(chr(10), ' ')}...")
+        if h.note:
+            typer.echo(f"    {h.note}")
 
 
 # ================= ask =================
@@ -126,6 +132,8 @@ def ask(
     no_rerank: bool = typer.Option(False),
     no_rewrite: bool = typer.Option(False),
     include_hidden: bool = typer.Option(False, "--include-hidden", help="包含隐藏/私有文档"),
+    include_expired: bool = typer.Option(False, "--include-expired", help="包含已过期文档，并标注时间"),
+    as_of: Optional[str] = typer.Option(None, help="按 YYYY-MM-DD 判断时效。完整历史查询仍是 P3"),
 ):
     """RAG 问答（带出处引用）。"""
     kb = _kb()
@@ -133,6 +141,8 @@ def ask(
         query, top_k=top_k, collection=collection,
         rerank=not no_rerank, rewrite=not no_rewrite,
         include_hidden=include_hidden,
+        include_expired=include_expired,
+        as_of=as_of,
     )
     typer.echo(ans.text)
     typer.echo("")
@@ -259,6 +269,54 @@ def governance_migrate_parents():
     kb = _kb()
     report = kb.migrate_parent_bodies()
     typer.echo(json.dumps(report, ensure_ascii=False))
+
+
+relations_app = typer.Typer(help="文档关系。pending 不生效，确认后才生效")
+governance_app.add_typer(relations_app, name="relations")
+
+
+@relations_app.command("list")
+def relations_list(
+    status: Optional[str] = typer.Option(None, help="pending | confirmed | rejected"),
+    rel_type: Optional[str] = typer.Option(None, "--type", help="supersedes | contradicts | related | merged_into"),
+    limit: int = typer.Option(50),
+):
+    """列出文档关系。"""
+    kb = _kb()
+    rows = kb.list_relations(status=status, rel_type=rel_type, limit=limit)
+    typer.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+
+
+@relations_app.command("confirm")
+def relations_confirm(
+    src: str = typer.Argument(..., help="关系起点。supersedes 时这是更新的文档"),
+    dst: str = typer.Argument(..., help="关系终点。supersedes 时这是被取代的文档"),
+    rel_type: str = typer.Argument(..., help="supersedes | merged_into | contradicts | related"),
+):
+    """确认一条关系。确认前检索结果不变。"""
+    kb = _kb()
+    try:
+        row = kb.confirm_relation(src, dst, rel_type)
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(row, ensure_ascii=False, indent=2))
+
+
+@relations_app.command("reject")
+def relations_reject(
+    src: str = typer.Argument(...),
+    dst: str = typer.Argument(...),
+    rel_type: str = typer.Argument(...),
+):
+    """拒绝一条关系。已确认的 supersedes 会收回 superseded 状态。"""
+    kb = _kb()
+    try:
+        row = kb.reject_relation(src, dst, rel_type)
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(row, ensure_ascii=False, indent=2))
 
 
 @app.command()
@@ -390,7 +448,10 @@ def chat():
 @app.command()
 def eval(
     dataset: str = typer.Option("eval/datasets/baseline.jsonl", help="评测集路径"),
-    mode: str = typer.Option("full", help="retrieval | full | refusal"),
+    mode: str = typer.Option(
+        "full",
+        help="retrieval | full | refusal | near_miss | conflict | expiry",
+    ),
     top_k: int = typer.Option(None),
     collection: Optional[str] = typer.Option(None),
     no_rerank: bool = typer.Option(False),
@@ -398,13 +459,17 @@ def eval(
     compare: Optional[str] = typer.Option(None, help="对比实验，如: rerank=on,off;top_k=3,5"),
     output: Optional[str] = typer.Option(None, help="报告输出路径（目录）"),
 ):
-    """运行评估：输出 recall@k / accuracy / faithfulness，或库外集的 refusal_recall。
+    """运行评估。
 
-    ``refusal`` 不调用裁判。没有 LLM key 时，低于可答阈值的拒答仍然计入；
-    检索分够高但生成失败时，该条不算拒答。
+    ``refusal`` 计算库外 ``refusal_recall``，不调用裁判。
+    ``near_miss`` / ``conflict`` / ``expiry`` 使用数据集里自带的笔记，跑完会删掉这些临时文档。
+    没有 LLM key 时，部分覆盖识别率记为跳过；冲突呈现和过期排除仍然计算。
     """
-    if mode not in {"retrieval", "full", "refusal"}:
-        typer.echo("mode 只能是 retrieval、full 或 refusal", err=True)
+    if mode not in {"retrieval", "full", "refusal", "near_miss", "conflict", "expiry"}:
+        typer.echo(
+            "mode 只能是 retrieval、full、refusal、near_miss、conflict 或 expiry",
+            err=True,
+        )
         raise typer.Exit(1)
     kb = _kb()
     items = load_dataset(dataset)

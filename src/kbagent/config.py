@@ -68,6 +68,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "KB_ANSWER_RERANK_TAU_LOW 不能高于 KB_ANSWER_RERANK_TAU_HIGH"
             )
+        if not 0.0 <= self.answer_strict_max_fail_rate <= 1.0:
+            raise ValueError("KB_ANSWER_STRICT_MAX_FAIL_RATE 必须在 0 到 1 之间")
+        for name, value in (
+            ("KB_NEAR_DUP_COSINE", self.near_dup_cosine),
+            ("KB_RELATION_NEIGHBOR_COSINE", self.relation_neighbor_cosine),
+        ):
+            if not 0.0 < float(value) <= 1.0:
+                raise ValueError(f"{name} 必须在 (0, 1] 内")
+        if self.near_dup_hamming < 0 or self.near_dup_cosine_hamming < 0:
+            raise ValueError("KB_NEAR_DUP_HAMMING 和 KB_NEAR_DUP_COSINE_HAMMING 不能为负")
+        if not 0.0 <= self.mmr_lambda <= 1.0:
+            raise ValueError("KB_MMR_LAMBDA 必须在 0 到 1 之间")
         return self
 
     # ---- 存储 ----
@@ -112,6 +124,23 @@ class Settings(BaseSettings):
     answer_tau_high: float = 0.54
     answer_rerank_tau_low: float = 0.50
     answer_rerank_tau_high: float = 0.90
+
+    # ---- 闸 3：声明校验。默认关。没有 LLM key 时跳过，不改闸 1 / 闸 2 ----
+    answer_strict: bool = False
+    # 失败条数 / 陈述条数 严格大于该值，或一条都留不下来时，整题改成固定拒答。
+    answer_strict_max_fail_rate: float = 0.5
+
+    # ---- 近似去重 / MMR / 邻居关系 ----
+    # 这些是文档化默认值，不是这次语料上重标的结果。余弦针对 L2 归一化向量
+    # （默认嵌入 BAAI/bge-small-zh-v1.5）。换模型、度量或语料后必须重标。
+    # 见 governance/near_dup.py 的 RETUNE_NOTE。
+    near_dup_cosine: float = 0.95
+    near_dup_hamming: int = 3
+    # 余弦已经 >= near_dup_cosine 时，SimHash 距离还要 <= 这个值才当成副本。
+    # 默认与 KB_NEAR_DUP_HAMMING 相同：只改结论、汉明距离更大的文档不会被吞掉。
+    near_dup_cosine_hamming: int = 3
+    mmr_lambda: float = 0.7
+    relation_neighbor_cosine: float = 0.80
 
     # ---- 意图识别 / 查询改写 ----
     intent_enabled: bool = True

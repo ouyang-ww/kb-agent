@@ -1,7 +1,7 @@
 # 项目进度
 
-> 更新时间：2026-11-10
-> 当前状态：**v0.1.0（L1 已交付）+ P0 完成 + 原件不双写已落地 + P1 可信与治理已落地**
+> 更新时间：2026-11-11
+> 当前状态：**v0.1.0（L1 已交付）+ P0 完成 + 原件不双写已落地 + P1 可信与治理已落地 + P2 严格模式 / 过期冲突 / 近似去重已落地**
 > 配套：[PLAN v4](../PLAN.md) · [架构设计](./architecture.md) · [知识治理](./knowledge-governance.md)
 
 ---
@@ -38,7 +38,17 @@
 - **库外拒答集**：`eval/datasets/out_of_kb.jsonl`（32 题，当前样例笔记覆盖不到）。`kb eval --mode refusal --dataset eval/datasets/out_of_kb.jsonl` 计算 `refusal_recall`。这个模式不调用裁判；没有 LLM key 时，低于 τ 的拒答仍然计入，检索分够高但生成失败的那条不算拒答
 - **检索 fail-closed**：默认查询的向量 `where` 是 `status=active` 且 `scope $in` 允许列表（`default`、`work`，再加配置里的 default scope）。不用 `$nin` 排除 private/secret：Chroma 的 `$nin` 会把缺字段也算进去。缺 scope 或空 scope 不会返回。`retriever.search()` 不传这道过滤时由检索器补上；补不上就抛错，不会静默搜全库。`include_hidden=True` 才是旁路。文档行 / 治理元数据仍是第二道，隐藏近邻占满窗口时仍会扩大窗口
 - **hide / unhide** 会把切块 `status` 写回去。`kb governance backfill` 给旧切块补 scope/status，否则缺这两项的旧切块不会被默认检索命中
-- **级联**：`vector_index` 消费 `doc_events`（hide / unhide / delete / pending_cleanup），失败进 `consumer_dead_letter` 后跳过。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只有名字和游标，游标停在 0，没有做学习模块
+- **级联**：`vector_index` 消费 `doc_events`（hide / unhide / delete / pending_cleanup / supersede / archive），失败进 `consumer_dead_letter` 后跳过。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只有名字和游标，游标停在 0，没有做学习模块
+
+### P2 严格模式、过期冲突、近似去重（2026-11-11）
+
+- **闸 3**：只在 `KB_ANSWER_STRICT=true` 时启用，默认关。答案拆成原子陈述，只按所引片段判断能否推出。推不出的陈述删掉并写入 gaps；失败率高于 `KB_ANSWER_STRICT_MAX_FAIL_RATE`（默认 0.5，严格大于）或一条都留不下来时，整题改成和闸 1 相同的固定拒答句。结果写入 `answer_log.verification_json`。没有 LLM key、也没有注入校验器时跳过，不改闸 1 / 闸 2，也不抛错
+- **时效**：`docs_meta` 补上 `last_verified`。切块写入整数 `valid_until`（YYYYMMDD，未设置是 `99991231`），因为 Chroma 的 `$gte` 不接受日期字符串。默认检索在原有 `status=active` 且 `scope $in` 之外，再要求 `valid_until >= 今天`。文档行是第二道。`valid_until` 当天仍有效，次日起排除。显式 `--include-expired` 或 `as_of=YYYY-MM-DD` 可以拿出过期来源，并标注时间。完整的历史 as-of 查询仍是 P3
+- **关系**：`doc_relations`（`supersedes` / `merged_into` / `contradicts` / `related`，`pending` / `confirmed` / `rejected`）。入库可以用显式 metadata、邻居余弦或 LLM 提议，全部先落成 pending，确认前不改变检索。`kb governance relations confirm` 之后，`supersedes` 把旧文档标成 `superseded` 并沿链指向最新；`contradicts` 两边都返回，并写明「存在两种说法」。不静默合并冲突
+- **近似去重**：精确哈希跳过保持不变。SimHash 64 位、汉明距离 `<= 3` 才不写第二份文档索引，并记 `duplicate_of`。余弦 `>= 0.95` 只有在汉明距离也 `<= 3` 时才算同一份副本，避免把未声明的冲突折叠掉。切块同样不写第二份向量；如果一篇里只丢掉一部分切块，入库报告记在 `partial`，不算完整成功。检索先折叠这种副本，再 MMR（λ 默认 0.7），然后才是原来的重排。声明了关系或 `allow_near_duplicate` 的文档不会被当成冗余副本。自动合并只发生在精确哈希
+- **阈值未重标**：余弦 0.95、汉明距离 3、MMR λ 0.7、邻居余弦 0.80 是文档化默认值，按 L2 归一化向量理解（默认嵌入 `BAAI/bge-small-zh-v1.5`）。余弦很高但 3-gram 距离大于 3 时不跳过、不折叠，避免吞掉未声明的冲突或复述。换嵌入、度量或语料后必须重标
+- **评测集**：`eval/datasets/near_miss.jsonl`（12）、`conflict.jsonl`（6）、`expiry.jsonl`（6）。`kb eval --mode near_miss|conflict|expiry` 会临时入库数据集里的笔记，跑完删除。没有 LLM key 时部分覆盖识别率记为跳过（-1）；冲突呈现和过期排除不依赖模型。原有 `refusal` 模式还在
+- **没有做**：题库去重、`mentions` / `items` / `reports` / `concept_pages`、一等历史查询、embedding 迁移演练
 
 ### 原件不双写（2026-11-04，ADR 0002）
 
@@ -50,7 +60,7 @@
 
 ## 2. 当前验证
 
-- 全量测试：**207 passed**（2026-11-10）。默认 τ 下库外集重排关、重排开的 `refusal_recall` 都是 1.0（样例笔记四篇，bge-small-zh-v1.5 / bge-reranker-base，无 LLM key；重排开那次模型已加载）
+- 全量测试：**226 passed**（2026-11-11，含 P2 返工）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即本分支起点 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
 - `STRUCTURE.md` 已补上源文件回读与父全文迁移相关文件
 - 测试历史：本地 `test_history.log`（已 gitignore，不随仓库发布）
 
@@ -67,7 +77,7 @@
 
 ## 4. 已知边界
 
-- 默认检索的向量 `where` 要求 `status=active`，且 `scope` 落在允许列表（`default` / `work`，或配置的 default scope）里。缺 scope、空 scope、private、secret 都不会被这道 `where` 返回。文档行和治理元数据仍是第二道。升级前缺这两项元数据的旧切块要跑一次 `kb governance backfill`
+- 默认检索的向量 `where` 要求 `status=active`，`scope` 落在允许列表（`default` / `work`，或配置的 default scope）里，并且整数 `valid_until >= 今天`（未设置是 `99991231`）。缺 scope、空 scope、private、secret、已过期都不会被这道 `where` 返回。文档行和治理元数据仍是第二道。升级前缺这些元数据的旧切块要跑一次 `kb governance backfill`
 - 同路径再入库或替换时，如果调用方没有显式传入新的 scope，会保留原来的 scope 和 hidden / private 状态，不会洗成默认可检索。显式传入 scope 才会按新范围写入并把状态放回 active
 - 多个进程共用一个 Chroma 目录时，另一个进程的 `kb repair` 或向量改写会让本进程已经加载的内存索引过期：`get` 能看到新记录，`query` 仍可能返回已删除的 id，默认检索因此变空。下一次检索会对比目录签名并重新打开客户端。跨进程改写之后，同一进程里随后的检索可能因为 mtime/fingerprint 继续漂移而每次都重新打开；结果仍然正确，本轮不处理。`kb repair` 的结果里有 `notice`，命令行也会打到 stderr：若检索仍然为空，重启那个进程。Chroma 不保证多个进程同时写入同一目录是安全的
 - `answer_log` / `audit_log` 暂无保留期与轮转策略
@@ -78,7 +88,7 @@
 - `content_hash` 与新文档 `doc_id` 存完整 SHA256（64 hex）。展示可以只用前 12 hex（`hash_display`），去重和主键不用截断值。见下方「哈希迁移」
 - `orphaned_copy` 表示源文件已经不在，库内全文留到用户处理。把文件放回且哈希一致后再跑 `migrate-parents`，会升为 `bound` 并删掉副本
 - `diverged` 表示源文件还在，但和已入库哈希不一致（不用 `orphaned_copy`，因为文件没丢）。迁移保留正文，并在结果里提示重新入库。文件改回与哈希一致后再跑一次，才会升为 `bound` 并删掉副本
-- 闸 3 声明校验、过期/冲突检测、近似去重尚未实现（P2）。近邻陷阱集、冲突集、过期集也还没有
+- 闸 3 声明校验、过期/冲突和近似去重已在 P2 落地。题库去重、mentions / items / reports、一等历史查询、embedding 迁移演练还没有。升级前缺 `valid_until` 的旧切块要再跑一次 `kb governance backfill`，否则默认检索的时效 `where` 不会命中它们
 - 同步通道、托盘 / 小窗、MCP、打开原文尚未实现。MVP 不做移动端
 - 工作知识管理不是当前 MVP
 
@@ -99,7 +109,7 @@
 
 近期顺序以本节为准。治理阶段的 P1、P2 与 [知识治理](./knowledge-governance.md) 同名。学习阶段叫 L2、S1–S4，见 [PLAN §6](../PLAN.md)。
 
-1. **P2 严格模式**：声明校验（闸 3 / `KB_ANSWER_STRICT`）、过期/冲突检测、近似去重。P1 已落地的闸门、引用契约、库外拒答集和 fail-closed scope 不在这里重做。mentions / items / reports 仍等学习模块，不要为了级联清单提前造这些表
+1. **P2 已落地**（2026-11-11）：闸 3 / `KB_ANSWER_STRICT`、过期与冲突、近似去重、近邻陷阱集 / 冲突集 / 过期集。题库去重仍等学习模块。P1 的闸门、引用契约、库外拒答集和 fail-closed scope 没有在这里重做。mentions / items / reports 仍等学习模块
 2. **学习切片**：硬编码几道题、作答、下次到期。不抽取概念，不等 L2。托盘或小窗可以在此起步。正式闪卡生成是 S1，排在第 5 条 L2 之后
 3. **本机 MCP**，以及用 Obsidian 或系统默认应用打开原文（含对外响应去掉绝对路径）。不挡住 ADR 0002 合并
 4. **同步通道预留**：许可模型、稳定 id、本机路径映射。不做移动端，也不做完整同步传输
@@ -122,7 +132,8 @@
 .venv/bin/kb answer-log
 .venv/bin/kb audit-log
 
-# 旧库补充 docs_meta，并给旧切块补上 scope/status
+# 旧库补充 docs_meta，并给旧切块补上 scope/status/valid_until
+# 缺 valid_until 的旧切块不会被默认检索的时效 where 命中
 .venv/bin/kb governance backfill
 
 # 消化 doc_events（目前只有 vector_index；其余消费者列在 residual）
@@ -130,6 +141,17 @@
 
 # 库外拒答：refusal_recall。不调用裁判
 .venv/bin/kb eval --mode refusal --dataset eval/datasets/out_of_kb.jsonl
+
+# 近邻陷阱 / 冲突 / 过期。数据集自带笔记，跑完会删掉临时文档
+# 没有 LLM key 时，部分覆盖识别率记为跳过；冲突呈现和过期排除仍然计算
+.venv/bin/kb eval --mode near_miss --dataset eval/datasets/near_miss.jsonl
+.venv/bin/kb eval --mode conflict --dataset eval/datasets/conflict.jsonl
+.venv/bin/kb eval --mode expiry --dataset eval/datasets/expiry.jsonl
+
+# 关系先是 pending。确认后才改变检索；拒绝则保持或收回
+.venv/bin/kb governance relations list --status pending
+.venv/bin/kb governance relations confirm <src_id> <dst_id> supersedes
+.venv/bin/kb governance relations reject <src_id> <dst_id> contradicts
 
 # 迁出已入库父全文（源文件缺失的记录标为 orphaned_copy）
 # REST（admin Key）：POST /v1/governance/migrate-parents

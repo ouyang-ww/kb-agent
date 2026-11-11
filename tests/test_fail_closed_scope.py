@@ -5,6 +5,7 @@ import pytest
 from kbagent.config import Settings
 from kbagent.errors import KBError
 from kbagent.governance import visibility_is_enforced
+from kbagent.governance.validity import expiry_is_enforced
 from kbagent.governance.consumers import RESIDUAL_CONSUMERS, drain_consumers
 from kbagent.governance.store import GovernanceStore
 from kbagent.retrieval.retriever import Retriever
@@ -15,7 +16,7 @@ from helpers import FakeEmbedder
 
 
 class _RecordingStore:
-    """where 为空时返回全部近邻；带了过滤才丢掉 hidden/private。"""
+    """可见性条件才会丢掉 hidden/private。只有时效条件时原样返回。"""
 
     def __init__(self, hits) -> None:
         self.hits = hits
@@ -23,7 +24,7 @@ class _RecordingStore:
 
     def query(self, collection, embedding, top_k, where=None):
         self.wheres.append(where)
-        if where is None:
+        if where is None or not visibility_is_enforced(where):
             return self.hits[:top_k]
         kept = []
         for hit in self.hits:
@@ -41,11 +42,22 @@ class _RecordingStore:
         return len(self.hits)
 
 
-def _hit(chunk_id: str, doc_id: str, *, status: str, scope: str, score: float):
+def _hit(
+    chunk_id: str,
+    doc_id: str,
+    *,
+    status: str,
+    scope: str,
+    score: float,
+    valid_until: int | None = 99991231,
+):
+    meta = {"doc_id": doc_id, "title": doc_id, "status": status, "scope": scope}
+    if valid_until is not None:
+        meta["valid_until"] = valid_until
     return VectorHit(
         id=chunk_id,
         document=doc_id,
-        metadata={"doc_id": doc_id, "title": doc_id, "status": status, "scope": scope},
+        metadata=meta,
         score=score,
     )
 
@@ -61,9 +73,12 @@ def test_search_without_caller_filter_stays_closed(tmp_path):
     assert [hit.doc_id for hit in hits] == ["vis"]
     assert store.wheres[0] is not None
     assert visibility_is_enforced(store.wheres[0])
+    assert expiry_is_enforced(store.wheres[0])
 
     revealed = retriever.search("q", top_k=3, include_hidden=True)
-    assert store.wheres[-1] is None
+    assert store.wheres[-1] is not None
+    assert visibility_is_enforced(store.wheres[-1]) is False
+    assert expiry_is_enforced(store.wheres[-1])
     assert [hit.doc_id for hit in revealed] == ["hid", "priv", "vis"]
 
 
@@ -81,6 +96,33 @@ def test_forgotten_visibility_filter_is_rejected(tmp_path, monkeypatch):
     assert store.wheres == []
 
 
+def test_missing_valid_until_is_not_returned(tmp_path):
+    """缺 valid_until 不能当成永不过期。假向量库即使交出来，检索器也丢掉。"""
+    bare = _hit(
+        "bare", "bare", status="active", scope="default", score=0.99, valid_until=None
+    )
+    dated = _hit("ok", "ok", status="active", scope="default", score=0.2)
+    store = _RecordingStore([bare, dated])
+    settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")
+    retriever = Retriever(FakeEmbedder(), store, settings, doc_visibility=None)
+    hits = retriever.search("q", top_k=5)
+    assert [hit.doc_id for hit in hits] == ["ok"]
+
+
+def test_forgotten_expiry_filter_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kbagent.retrieval.retriever.validity_filter", lambda *_args, **_kwargs: None
+    )
+    store = _RecordingStore(
+        [_hit("v", "vis", status="active", scope="default", score=0.5)]
+    )
+    settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")
+    retriever = Retriever(FakeEmbedder(), store, settings)
+    with pytest.raises(KBError, match="valid_until"):
+        retriever.search("q", top_k=1)
+    assert store.wheres == []
+
+
 def test_missing_or_empty_scope_is_not_searched(tmp_path):
     from kbagent.vectorstore.chroma_store import ChromaStore
 
@@ -91,11 +133,11 @@ def test_missing_or_empty_scope_is_not_searched(tmp_path):
         [[1.0, 0.0]] * 5,
         ["可见", "缺范围", "空范围", "隐藏", "私有"],
         [
-            {"doc_id": "ok", "status": "active", "scope": "default"},
-            {"doc_id": "noscope", "status": "active"},
-            {"doc_id": "empty", "status": "active", "scope": ""},
-            {"doc_id": "hidden", "status": "hidden", "scope": "default"},
-            {"doc_id": "private", "status": "active", "scope": "private"},
+            {"doc_id": "ok", "status": "active", "scope": "default", "valid_until": 99991231},
+            {"doc_id": "noscope", "status": "active", "valid_until": 99991231},
+            {"doc_id": "empty", "status": "active", "scope": "", "valid_until": 99991231},
+            {"doc_id": "hidden", "status": "hidden", "scope": "default", "valid_until": 99991231},
+            {"doc_id": "private", "status": "active", "scope": "private", "valid_until": 99991231},
         ],
     )
     settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")

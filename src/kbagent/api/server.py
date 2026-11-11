@@ -159,6 +159,7 @@ def _hit_out(h, expose_paths: bool = False) -> HitOut:
         score=round(h.score, 4),
         snippet=h.text[:300],
         media=_media_out(h.media, expose_paths),
+        note=getattr(h, "note", "") or "",
     )
 
 
@@ -253,6 +254,8 @@ def create_app(
             top_k=req.top_k,
             where=req.where,
             collection=req.collection,
+            include_expired=req.include_expired,
+            as_of=req.as_of,
         )
         return SearchResponse(hits=[_hit_out(h, _expose_paths()) for h in hits])
 
@@ -263,6 +266,8 @@ def create_app(
             top_k=req.top_k,
             where=req.where,
             collection=req.collection,
+            include_expired=req.include_expired,
+            as_of=req.as_of,
         )
         return AskResponse(
             text=ans.text,
@@ -275,6 +280,7 @@ def create_app(
                     snippet=s.snippet,
                     section=s.section,
                     media=_media_out(s.media, _expose_paths()),
+                    note=s.note,
                 )
                 for s in ans.sources
             ],

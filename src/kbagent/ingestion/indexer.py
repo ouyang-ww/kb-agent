@@ -20,6 +20,26 @@ from ..config import Settings
 from ..document_store.base import DocumentStore
 from ..errors import IngestError, NotFoundError
 from ..governance import ACTIVE_STATUS, HIDDEN_SCOPES, DocMeta, GovernanceStore
+from ..governance.near_dup import (
+    RELATION_TYPES,
+    cosine,
+    explicit_relations,
+    hook_relation,
+    mean_pool,
+    parse_llm_relation,
+    parse_simhash,
+    relation_intent,
+    simhash64,
+    simhash_hex,
+    hamming,
+)
+from ..governance.scope import visibility_filter
+from ..governance.validity import (
+    chunk_valid_until,
+    is_expired,
+    parse_explicit_day,
+    validity_filter,
+)
 from ..governance.vectors import sync_chunk_governance
 from ..models import (
     SOURCE_BOUND,
@@ -28,7 +48,7 @@ from ..models import (
     Document,
     MediaRef,
 )
-from ..storage.filters import eq
+from ..storage.filters import and_where, eq
 from ..vectorstore.base import StoredVector, VectorStore
 from .chunker import Chunker
 from .cleaner import Cleaner
@@ -51,15 +71,39 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _date_meta(validity: dict) -> dict:
+    """只把有值的日期写进切块。None 不能进 Chroma。"""
+    out = {}
+    for key in ("valid_from", "review_by", "last_verified"):
+        value = validity.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    return out
+
+
+def _authority_value(raw, prior: int | None) -> int:
+    if raw is None or raw == "":
+        return prior if prior is not None else 3
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        return prior if prior is not None else 3
+    return min(5, max(1, number))
+
+
 @dataclass
 class IngestReport:
     added: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     failed: list[dict] = field(default_factory=list)
+    # 近似重复：没有写入第二份索引，只记下 duplicate_of。精确哈希跳过不记在这里。
+    duplicates: list[dict] = field(default_factory=list)
+    # 只写入了一部分切块。不算完整成功。
+    partial: list[dict] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.failed
+        return not self.failed and not self.partial
 
 
 def _source_kind(source_path: str, requested: str | None) -> str:
@@ -118,6 +162,7 @@ class Indexer:
         doc_store: DocumentStore,
         vision_indexer=None,
         governance: GovernanceStore | None = None,
+        llm=None,
     ) -> None:
         self.settings = settings
         self.embedder = embedder
@@ -125,10 +170,13 @@ class Indexer:
         self.doc_store = doc_store
         self.vision_indexer = vision_indexer
         self.governance = governance
+        self.llm = llm
         self.chunker = Chunker(settings.chunk_size, settings.chunk_overlap)
         self.cleaner = Cleaner()
         # 与文档库同一文件、独立连接。删除/替换向量之前先提交一行日志。
         self.journal = IngestJournal(settings.documents_db)
+        self._last_skip: dict | None = None
+        self._partial_index: dict | None = None
 
     # ---- 入口 ----
     def ingest_path(
@@ -149,10 +197,15 @@ class Indexer:
                     if scope:
                         raw["scope"] = scope
                     doc_id = self._ingest_raw(raw, force=force)
-                    if doc_id:
+                    if doc_id and self._partial_index:
+                        report.partial.append(dict(self._partial_index))
+                        report.added.append(doc_id)
+                    elif doc_id:
                         report.added.append(doc_id)
                     else:
                         report.skipped.append(str(f))
+                        if self._last_skip:
+                            report.duplicates.append(dict(self._last_skip))
             except IngestError as exc:
                 report.failed.append({"path": str(f), "error": str(exc)})
         return report
@@ -235,6 +288,9 @@ class Indexer:
 
     # ---- 核心 ----
     def _ingest_raw(self, raw: dict, force: bool) -> str | None:
+        self._last_skip = None
+        self._partial_index = None
+        self._chunk_skips = []
         collection = raw.get("collection") or self.settings.default_collection
         source_path = raw.get("source_path", "") or ""
         title = raw.get("title", "untitled")
@@ -305,6 +361,18 @@ class Indexer:
             scope = self.settings.default_scope
             status = requested_status or ACTIVE_STATUS
 
+        validity = self._resolve_validity(user_meta, prior.doc_id if prior else None)
+        until = chunk_valid_until(validity["valid_until"])
+        fingerprint = simhash_hex(cleaned)
+        kept_embedding: list[float] | None = None
+        if not force and not relation_intent(user_meta):
+            skipped = self._document_near_duplicate(
+                doc_id, cleaned, collection, fingerprint
+            )
+            if skipped is not None:
+                self._last_skip = skipped
+                return None
+
         chunks = self.chunker.chunk(doc_id, cleaned, base_meta=_scalarize({
             **user_meta,
             "doc_id": doc_id,
@@ -313,6 +381,9 @@ class Indexer:
             "doc_type": raw.get("doc_type", "text"),
             "scope": scope,
             "status": status,
+            "valid_until": until,
+            "authority": validity["authority"],
+            **_date_meta(validity),
         }))
 
         media_refs: list[MediaRef] = []
@@ -356,6 +427,8 @@ class Indexer:
                 "chunker_version": self.settings.chunker_version,
                 "scope": scope,
                 "status": status,
+                "valid_until": until,
+                "authority": validity["authority"],
                 **(c.media.to_metadata() if c.media else {}),
             }
             for c in chunks
@@ -366,6 +439,43 @@ class Indexer:
         batch = self.settings.embedding_batch_size
         for i in range(0, len(texts), batch):
             embeddings.extend(self.embedder.embed_texts(texts[i : i + batch]))
+
+        if not force and not relation_intent(user_meta):
+            ids, embeddings, texts, metas, locations = self._drop_duplicate_chunks(
+                doc_id, collection, ids, embeddings, texts, metas, locations
+            )
+            if not ids:
+                target = self._last_skip or {
+                    "kind": "document",
+                    "source_id": doc_id,
+                    "duplicate_of": "",
+                    "method": "cosine",
+                    "score": None,
+                }
+                self._last_skip = target
+                if self.governance is not None and target.get("duplicate_of"):
+                    self.governance.record_near_duplicate(
+                        "document",
+                        doc_id,
+                        str(target["duplicate_of"]),
+                        str(target.get("method") or "cosine"),
+                        target.get("score"),
+                    )
+                return None
+
+        kept_embedding = mean_pool(embeddings)
+        if self._chunk_skips and ids:
+            self._partial_index = {
+                "doc_id": doc_id,
+                "indexed_chunks": len(ids),
+                "skipped_chunks": list(self._chunk_skips),
+            }
+            logger.warning(
+                "文档 %s 只写入了 %s 个切块，另有 %s 个近似重复切块未建索引",
+                doc_id,
+                len(ids),
+                len(self._chunk_skips),
+            )
 
         now = _utcnow()
         # 绑定原件只留在文件系统。inline / orphaned_copy 才把正文写入应用库。
@@ -400,7 +510,15 @@ class Indexer:
             status=status,
             content_hash=h,
             exclude_from_learning=bool(user_meta.get("exclude_from_learning", False)),
+            validity=validity,
+            simhash_value=fingerprint,
         )
+        try:
+            self._propose_relations(
+                doc, kept_embedding, user_meta, collection, validity
+            )
+        except Exception:
+            logger.warning("文档 %s 的关系建议没有写入", doc.doc_id, exc_info=True)
 
         # 相同内容强制写入到另一个 doc_id：新文档成功后再删旧副本。
         if duplicate and force and duplicate.doc_id != doc_id:
@@ -420,6 +538,8 @@ class Indexer:
         status: str,
         content_hash: str,
         exclude_from_learning: bool,
+        validity: dict | None = None,
+        simhash_value: str = "",
     ) -> None:
         """写入向量和父文档。同 doc_id 先删旧向量再 add；失败则回滚。
 
@@ -468,12 +588,19 @@ class Indexer:
             wrote_sqlite = True
 
             if self.governance is not None:
+                fields = validity or {}
                 self.governance.upsert_meta(
                     DocMeta(
                         doc_id=doc.doc_id,
                         content_hash=content_hash,
                         scope=scope,
                         status=status,
+                        authority=int(fields.get("authority") or 3),
+                        valid_from=fields.get("valid_from"),
+                        valid_until=fields.get("valid_until"),
+                        review_by=fields.get("review_by"),
+                        last_verified=fields.get("last_verified"),
+                        simhash=simhash_value or None,
                         exclude_from_learning=exclude_from_learning,
                     )
                 )
@@ -872,6 +999,360 @@ class Indexer:
             report["notice"] = notice
             logger.warning("%s", notice)
         return report
+
+    def _resolve_validity(self, user_meta: dict, prior_id: str | None) -> dict:
+        prior = None
+        if prior_id and self.governance is not None:
+            try:
+                prior = self.governance.get_meta(prior_id)
+            except Exception:
+                logger.warning("读取文档 %s 的时效失败，按新文档处理", prior_id, exc_info=True)
+        meta = user_meta or {}
+
+        def pick(key: str):
+            if key in meta:
+                raw = meta.get(key)
+            elif prior is not None:
+                raw = getattr(prior, key, None)
+            else:
+                return None
+            try:
+                return parse_explicit_day(raw, key)
+            except Exception as exc:
+                raise IngestError(str(exc)) from exc
+
+        return {
+            "valid_from": pick("valid_from"),
+            "valid_until": pick("valid_until"),
+            "review_by": pick("review_by"),
+            "last_verified": pick("last_verified"),
+            "authority": _authority_value(
+                meta.get("authority") if "authority" in meta else None,
+                prior.authority if prior is not None else None,
+            ),
+        }
+
+    def _active_where(self):
+        return and_where(
+            visibility_filter(self.settings.default_scope),
+            validity_filter(),
+        )
+
+    def _document_near_duplicate(
+        self,
+        doc_id: str,
+        cleaned: str,
+        collection: str,
+        fingerprint: str,
+    ) -> dict | None:
+        """近似重复则不写第二份索引。精确哈希在更早的分支已经返回。"""
+        sim = self._simhash_duplicate(fingerprint, exclude={doc_id})
+        if sim is not None:
+            other, distance = sim
+            self._remember_duplicate("document", doc_id, other, "simhash", float(distance))
+            return dict(self._last_skip or {})
+        try:
+            vector = self.embedder.embed_texts([cleaned])[0]
+        except Exception:
+            logger.warning("近似去重无法嵌入全文，继续入库", exc_info=True)
+            return None
+        found = self._cosine_document(vector, collection, exclude={doc_id}, cleaned=cleaned)
+        if found is None:
+            return None
+        other, score = found
+        self._remember_duplicate("document", doc_id, other, "cosine", score)
+        return dict(self._last_skip or {})
+
+    def _simhash_duplicate(
+        self, fingerprint: str, exclude: set[str]
+    ) -> tuple[str, int] | None:
+        mine = parse_simhash(fingerprint)
+        if mine is None or self.governance is None:
+            return None
+        limit = int(self.settings.near_dup_hamming)
+        try:
+            rows = self.governance.iter_simhashes()
+        except Exception:
+            logger.warning("读取 simhash 失败，跳过这一路近似去重", exc_info=True)
+            return None
+        best: tuple[str, int] | None = None
+        for other_id, other_hex, valid_until in rows:
+            if other_id in exclude or is_expired(valid_until):
+                continue
+            other = parse_simhash(other_hex)
+            if other is None:
+                continue
+            distance = hamming(mine, other)
+            if distance <= limit and (best is None or distance < best[1]):
+                best = (other_id, distance)
+        return best
+
+    def _cosine_document(
+        self,
+        embedding: list[float],
+        collection: str,
+        exclude: set[str],
+        cleaned: str,
+    ) -> tuple[str, float] | None:
+        neighbors = self._neighbor_docs(embedding, collection, exclude, limit=5)
+        best: tuple[str, float] | None = None
+        threshold = float(self.settings.near_dup_cosine)
+        guard = int(self.settings.near_dup_cosine_hamming)
+        mine = simhash64(cleaned)
+        for doc_id, score, sample in neighbors:
+            if score < threshold:
+                continue
+            if hamming(mine, simhash64(sample)) > guard:
+                continue
+            if best is None or score > best[1]:
+                best = (doc_id, score)
+        return best
+
+    def _neighbor_docs(
+        self,
+        embedding: list[float],
+        collection: str,
+        exclude: set[str],
+        limit: int,
+        include_expired: bool = False,
+    ) -> list[tuple[str, float, str]]:
+        where = (
+            visibility_filter(self.settings.default_scope)
+            if include_expired
+            else self._active_where()
+        )
+        try:
+            hits = self.vector_store.query(
+                collection, embedding, max(limit * 3, limit), where
+            )
+        except Exception:
+            logger.warning("近似去重的邻居查询失败", exc_info=True)
+            return []
+        found: list[tuple[str, float, str]] = []
+        seen: set[str] = set()
+        for hit in hits:
+            doc_id = str((hit.metadata or {}).get("doc_id") or "")
+            if not doc_id or doc_id in exclude or doc_id in seen:
+                continue
+            seen.add(doc_id)
+            try:
+                rows = self.vector_store.get(
+                    collection,
+                    where=eq("doc_id", doc_id),
+                    include_embeddings=True,
+                )
+            except Exception:
+                logger.warning("读取文档 %s 的向量失败", doc_id, exc_info=True)
+                continue
+            pooled = mean_pool(
+                [list(row.embedding) for row in rows if row.embedding]
+            )
+            if pooled is None:
+                continue
+            sample = rows[0].document if rows else ""
+            found.append((doc_id, cosine(embedding, pooled), sample or ""))
+            if len(found) >= limit:
+                break
+        return found
+
+    def _drop_duplicate_chunks(
+        self,
+        doc_id: str,
+        collection: str,
+        ids: list[str],
+        embeddings: list[list[float]],
+        texts: list[str],
+        metas: list[dict],
+        locations,
+    ):
+        kept_ids: list[str] = []
+        kept_emb: list[list[float]] = []
+        kept_txt: list[str] = []
+        kept_meta: list[dict] = []
+        kept_loc = []
+        threshold = float(self.settings.near_dup_cosine)
+        guard = int(self.settings.near_dup_cosine_hamming)
+        for index, embedding in enumerate(embeddings):
+            match = self._chunk_match(
+                embedding,
+                texts[index],
+                collection,
+                doc_id,
+                list(zip(kept_ids, kept_emb, kept_txt)),
+                threshold,
+                guard,
+            )
+            if match is not None:
+                other, score = match
+                self._chunk_skips.append(
+                    {
+                        "chunk_id": ids[index],
+                        "duplicate_of": other,
+                        "score": score,
+                    }
+                )
+                self._remember_duplicate("chunk", ids[index], other, "cosine", score)
+                continue
+            kept_ids.append(ids[index])
+            kept_emb.append(embedding)
+            kept_txt.append(texts[index])
+            kept_meta.append(metas[index])
+            if index < len(locations):
+                kept_loc.append(locations[index])
+        return kept_ids, kept_emb, kept_txt, kept_meta, kept_loc
+
+    def _chunk_match(
+        self,
+        embedding: list[float],
+        text: str,
+        collection: str,
+        doc_id: str,
+        kept: list[tuple[str, list[float], str]],
+        threshold: float,
+        guard: int,
+    ) -> tuple[str, float] | None:
+        mine = simhash64(text or "")
+        for chunk_id, other, other_text in kept:
+            score = cosine(embedding, other)
+            if score >= threshold and hamming(mine, simhash64(other_text or "")) <= guard:
+                return chunk_id, score
+        try:
+            hits = self.vector_store.query(
+                collection, embedding, 5, self._active_where()
+            )
+        except Exception:
+            logger.warning("切块近似去重查询失败，这条切块仍会写入", exc_info=True)
+            return None
+        for hit in hits:
+            other_doc = str((hit.metadata or {}).get("doc_id") or "")
+            if not other_doc or other_doc == doc_id:
+                continue
+            try:
+                rows = self.vector_store.get(
+                    collection, ids=[hit.id], include_embeddings=True
+                )
+            except Exception:
+                continue
+            if not rows or not rows[0].embedding:
+                continue
+            score = cosine(embedding, list(rows[0].embedding))
+            if score < threshold:
+                continue
+            if hamming(mine, simhash64(hit.document or "")) > guard:
+                continue
+            return hit.id, score
+        return None
+
+    def _remember_duplicate(
+        self,
+        kind: str,
+        source_id: str,
+        duplicate_of: str,
+        method: str,
+        score: float | None,
+    ) -> None:
+        self._last_skip = {
+            "kind": kind,
+            "source_id": source_id,
+            "duplicate_of": duplicate_of,
+            "method": method,
+            "score": score,
+        }
+        if self.governance is None or not duplicate_of:
+            return
+        try:
+            self.governance.record_near_duplicate(
+                kind, source_id, duplicate_of, method, score
+            )
+        except Exception:
+            logger.warning("近似重复映射没有写入", exc_info=True)
+
+    def _propose_relations(
+        self,
+        doc: Document,
+        embedding: list[float] | None,
+        user_meta: dict,
+        collection: str,
+        validity: dict,
+    ) -> None:
+        """邻居和显式声明都只进 pending。没有 key 时用确定性钩子，不调用模型。"""
+        if self.governance is None:
+            return
+        declared = explicit_relations(user_meta)
+        declared_dst = {dst for dst, _rel in declared}
+        for dst, rel in declared:
+            if rel not in RELATION_TYPES:
+                continue
+            self.governance.propose_relation(
+                doc.doc_id, dst, rel, confidence=1.0, created_by="user"
+            )
+        if embedding is None:
+            return
+        neighbors = self._neighbor_docs(
+            embedding, collection, exclude={doc.doc_id}, limit=5, include_expired=True
+        )
+        for other_id, score, _sample in neighbors:
+            if other_id in declared_dst:
+                continue
+            if score < float(self.settings.relation_neighbor_cosine):
+                continue
+            try:
+                neighbor = self.governance.get_meta(other_id)
+            except Exception:
+                neighbor = None
+            explicit = None
+            suggested = hook_relation(
+                explicit=explicit,
+                cosine_score=score,
+                neighbor_threshold=float(self.settings.relation_neighbor_cosine),
+                neighbor_expired=bool(neighbor and is_expired(neighbor.valid_until)),
+                new_verified=validity.get("last_verified"),
+                old_verified=neighbor.last_verified if neighbor else None,
+            )
+            created_by = "hook"
+            confidence = float(score)
+            rel = suggested
+            judged = self._llm_relation(doc, other_id, neighbor)
+            if judged is not None:
+                rel, confidence = judged
+                created_by = "llm"
+            if rel is None:
+                continue
+            self.governance.propose_relation(
+                doc.doc_id,
+                other_id,
+                rel,
+                confidence=confidence,
+                created_by=created_by,
+            )
+
+    def _llm_relation(self, doc: Document, other_id: str, neighbor: DocMeta | None):
+        if self.llm is None or not (self.settings.llm_api_key or "").strip():
+            return None
+        other_title = other_id
+        try:
+            other = self.doc_store.get(other_id)
+        except Exception:
+            other = None
+        if other is not None and other.title:
+            other_title = other.title
+        prompt = (
+            "判断新文档相对已有文档的关系。只能是 supersedes、merged_into、"
+            "contradicts、related 之一；无法判断就让 type 为空。"
+            "不要因为话题相近就写成 supersedes。只输出 JSON："
+            '{"type": "related", "confidence": 0.5}\n'
+            f"新文档：{doc.title}\n摘要：{doc.summary}\n"
+            f"已有文档：{other_title}\n"
+        )
+        try:
+            payload = self.llm.chat_json([{"role": "user", "content": prompt}])
+        except Exception:
+            logger.warning("关系判断的模型调用失败，改用确定性钩子", exc_info=True)
+            return None
+        rel, confidence = parse_llm_relation(payload)
+        if rel is None:
+            return None
+        return rel, confidence
 
     def _kept_visibility(self, prior: Document) -> tuple[str, str]:
         """再入库没给新 scope 时沿用的范围和状态。

@@ -88,6 +88,7 @@ kb._vector_store.add(
         "title": "笔记",
         "scope": "default",
         "status": "active",
+        "valid_until": 99991231,
         "source_path": "",
         "section": "",
     }],
