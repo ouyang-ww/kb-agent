@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from kbagent.eval.dataset import load_dataset
-from kbagent.eval.metrics import partial_coverage_recognized
+import pytest
+
+from kbagent.errors import IngestError
+from kbagent.eval.metrics import acknowledges_missing_points
 from kbagent.eval.runner import Evaluator
 from kbagent.generation.answerability import INSUFFICIENT_EVIDENCE
 from kbagent.governance.near_dup import RETUNE_NOTE, cosine, hamming, simhash64
@@ -200,7 +203,7 @@ def test_confirmed_contradiction_returns_both_accounts(kb):
 
 def test_near_duplicate_document_is_not_indexed_again(kb):
     kept = kb.ingest_text("苹果是一种常见水果，味道清甜。", title="苹果")
-    skipped = kb.ingest_text("苹果是一种常见水果，味道清甜呀。", title="苹果副本")
+    skipped = kb.ingest_text("苹果是一种常见水果，味道清甜。了", title="苹果副本")
     assert kept
     assert skipped is None
     rows = kb.list_near_duplicates(kind="document")
@@ -243,16 +246,15 @@ def test_near_duplicate_chunks_do_not_dominate_top_k():
 
     copies = [
         RetrievalHit(chunk_id="a", doc_id="a", text="苹果是一种常见水果，味道清甜。", score=0.99),
-        RetrievalHit(chunk_id="b", doc_id="b", text="苹果是一种常见水果，味道清甜呀。", score=0.98),
-        RetrievalHit(chunk_id="c", doc_id="c", text="苹果是一种常见水果，味道清甜呢。", score=0.97),
+        RetrievalHit(chunk_id="b", doc_id="b", text="苹果是一种常见水果，味道清甜。了", score=0.98),
         RetrievalHit(chunk_id="d", doc_id="d", text="量子计算机需要稀释制冷机才能运行超导比特。", score=0.80),
     ]
     from helpers import FakeEmbedder
 
     folded = select_diverse(copies, FakeEmbedder(), k=2, cosine_threshold=0.95, mmr_lambda=0.7)
     assert "d" in {hit.doc_id for hit in folded}
-    assert len({hit.doc_id for hit in folded} & {"a", "b", "c"}) == 1
-    assert hamming(simhash64(copies[0].text), simhash64(copies[1].text)) > 3
+    assert len({hit.doc_id for hit in folded} & {"a", "b"}) == 1
+    assert hamming(simhash64(copies[0].text), simhash64(copies[1].text)) <= 3
 
 
 def test_governance_eval_sets_run_without_dropping_refusal(kb):
@@ -279,15 +281,128 @@ def test_governance_eval_sets_run_without_dropping_refusal(kb):
     assert near_result.warnings
     assert kb.list_documents(include_hidden=True) == []
 
-    def _fake_ask(query, **kwargs):
-        from kbagent.models import Answer
+    from kbagent.models import Answer
 
-        return Answer(
-            text="资料只覆盖了一部分，缺少投影仪。",
-            meta={"gaps": ["投影仪"]},
-        )
+    def _weak(query, **kwargs):
+        return Answer(text="（依据较弱：请核对原文后再采用。）", meta={})
 
-    kb.ask = _fake_ask
-    counted = Evaluator(kb, kb.settings).run(near[:2], mode="near_miss", rerank=False, top_k=3)
+    kb.ask = _weak
+    missed = Evaluator(kb, kb.settings).run(near[:1], mode="near_miss", rerank=False, top_k=3)
+    assert missed.metrics["partial_coverage_rate"] == 0.0
+    assert acknowledges_missing_points("（依据较弱：请核对原文后再采用。）", {}, ["投影仪"]) is False
+
+    def _named(query, **kwargs):
+        return Answer(text="资料没有写投影仪。", meta={"gaps": ["投影仪"]})
+
+    kb.ask = _named
+    counted = Evaluator(kb, kb.settings).run(near[:1], mode="near_miss", rerank=False, top_k=3)
     assert counted.metrics["partial_coverage_rate"] == 1.0
-    assert partial_coverage_recognized("依据较弱", {}) is True
+
+
+def test_confirmed_relation_does_not_surface_private_or_expired(kb):
+    kb.settings.answer_tau_low = 0
+    kb.settings.answer_tau_high = 0
+    public = kb.ingest_text("公开说法：远程每周最多一天，必须审批。", title="公开远程")
+    private = kb.ingest_text(
+        "秘密说法：远程天数不限，不必审批。", title="秘密远程", scope="private"
+    )
+    expired = kb.ingest_text(
+        "过期说法：远程一律禁止，必须每天坐班。",
+        title="过期远程",
+        metadata={"valid_until": "2020-01-01"},
+    )
+    kb.propose_relation(public, private, "contradicts", created_by="user")
+    kb.confirm_relation(public, private, "contradicts")
+    kb.propose_relation(public, expired, "contradicts", created_by="user")
+    kb.confirm_relation(public, expired, "contradicts")
+
+    hits = kb.search("远程每周要不要审批", top_k=5)
+    found = {hit.doc_id for hit in hits}
+    assert public in found
+    assert private not in found
+    assert expired not in found
+    ans = kb.ask("远程每周要不要审批", top_k=5)
+    cited = {source.doc_id for source in ans.sources}
+    assert private not in cited
+    assert expired not in cited
+    assert public in cited
+
+    revealed = kb.search("远程每周要不要审批", top_k=5, include_hidden=True, include_expired=True)
+    revealed_ids = {hit.doc_id for hit in revealed}
+    assert private in revealed_ids
+    assert expired in revealed_ids
+
+
+def test_supersedes_to_hidden_or_expired_keeps_the_searchable_hit(kb):
+    older = kb.ingest_text("旧的公开制度：食堂周一供应面条。", title="食堂旧")
+    hidden_new = kb.ingest_text(
+        "新的秘密制度：食堂周一供应海鲜。", title="食堂秘密", scope="private"
+    )
+    kb.governance.propose_relation(hidden_new, older, "supersedes", created_by="user")
+    kb.governance.set_relation_status(hidden_new, older, "supersedes", "confirmed")
+    assert kb.latest_doc(older) == hidden_new
+    hits = kb.search("食堂周一供应", top_k=5)
+    found = {hit.doc_id for hit in hits}
+    assert older in found
+    assert hidden_new not in found
+
+    current = kb.ingest_text("现行制度：差旅每晚报销八百元。", title="差旅现行")
+    stale = kb.ingest_text(
+        "失效制度：差旅每晚只报销三百元。",
+        title="差旅失效",
+        metadata={"valid_until": "2019-01-01"},
+    )
+    kb.governance.propose_relation(stale, current, "supersedes", created_by="user")
+    kb.governance.set_relation_status(stale, current, "supersedes", "confirmed")
+    later = kb.search("差旅每晚报销", top_k=5)
+    later_ids = {hit.doc_id for hit in later}
+    assert current in later_ids
+    assert stale not in later_ids
+
+
+def test_unparseable_valid_until_is_rejected(kb):
+    with pytest.raises(IngestError, match="valid_until"):
+        kb.ingest_text("这条日期写错了。", title="坏日期", metadata={"valid_until": "2020/01/01"})
+    assert kb.list_documents() == []
+
+
+def test_near_dup_does_not_swallow_undeclared_conflict(kb):
+    left = kb.ingest_text("公司年假一共 5 天，不含周末。", title="年假甲")
+    right = kb.ingest_text("公司年假一共 15 天，不含周末。", title="年假乙")
+    assert left and right and left != right
+    hits = kb.search("公司年假一共几天", top_k=5)
+    found = {hit.doc_id for hit in hits}
+    assert left in found
+    assert right in found
+
+
+def test_equal_scores_keep_the_newer_verification():
+    from helpers import FakeEmbedder
+
+    text = "同一份说明，只是核对时间不同。"
+    hits = [
+        RetrievalHit(chunk_id="old", doc_id="old", text=text, score=0.9, last_verified=""),
+        RetrievalHit(
+            chunk_id="mid", doc_id="mid", text=text, score=0.9, last_verified="2020-01-01"
+        ),
+        RetrievalHit(
+            chunk_id="new", doc_id="new", text=text, score=0.9, last_verified="2024-06-01"
+        ),
+    ]
+    picked = select_diverse(hits, FakeEmbedder(), k=1, cosine_threshold=0.95, mmr_lambda=0.7)
+    assert [hit.doc_id for hit in picked] == ["new"]
+
+
+def test_partial_chunk_index_is_not_a_full_success(kb, tmp_path):
+    kept = "苹果是一种常见水果，味道清甜呢。"
+    kb.ingest_text(kept, title="已有苹果")
+    kb._indexer.chunker.chunk_size = max(len(kept), 8)
+    path = tmp_path / "mixed.md"
+    path.write_text(kept + "\n\n" + ("量子比特需要稀释制冷机才能稳定运行。" * 6), encoding="utf-8")
+    report = kb.ingest(path)
+    assert report.partial
+    assert report.ok is False
+    assert report.partial[0]["doc_id"] in report.added
+    assert report.partial[0]["indexed_chunks"] >= 1
+    assert report.partial[0]["skipped_chunks"]
+

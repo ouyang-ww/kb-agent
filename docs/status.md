@@ -45,8 +45,8 @@
 - **闸 3**：只在 `KB_ANSWER_STRICT=true` 时启用，默认关。答案拆成原子陈述，只按所引片段判断能否推出。推不出的陈述删掉并写入 gaps；失败率高于 `KB_ANSWER_STRICT_MAX_FAIL_RATE`（默认 0.5，严格大于）或一条都留不下来时，整题改成和闸 1 相同的固定拒答句。结果写入 `answer_log.verification_json`。没有 LLM key、也没有注入校验器时跳过，不改闸 1 / 闸 2，也不抛错
 - **时效**：`docs_meta` 补上 `last_verified`。切块写入整数 `valid_until`（YYYYMMDD，未设置是 `99991231`），因为 Chroma 的 `$gte` 不接受日期字符串。默认检索在原有 `status=active` 且 `scope $in` 之外，再要求 `valid_until >= 今天`。文档行是第二道。`valid_until` 当天仍有效，次日起排除。显式 `--include-expired` 或 `as_of=YYYY-MM-DD` 可以拿出过期来源，并标注时间。完整的历史 as-of 查询仍是 P3
 - **关系**：`doc_relations`（`supersedes` / `merged_into` / `contradicts` / `related`，`pending` / `confirmed` / `rejected`）。入库可以用显式 metadata、邻居余弦或 LLM 提议，全部先落成 pending，确认前不改变检索。`kb governance relations confirm` 之后，`supersedes` 把旧文档标成 `superseded` 并沿链指向最新；`contradicts` 两边都返回，并写明「存在两种说法」。不静默合并冲突
-- **近似去重**：精确哈希跳过保持不变。SimHash 64 位、汉明距离 `<= 3`，或余弦 `>= 0.95` 且汉明距离 `<= 8`，不写第二份文档索引，只记 `duplicate_of`。切块同样不写第二份向量。检索先折叠这种副本，再 MMR（λ 默认 0.7），然后才是原来的重排。声明了关系或 `allow_near_duplicate` 的文档不会被当成冗余副本。自动合并只发生在精确哈希
-- **阈值未重标**：余弦 0.95、汉明距离 3、余弦去重的汉明上限 8、MMR λ 0.7、邻居余弦 0.80 是文档化默认值，按 L2 归一化向量理解（默认嵌入 `BAAI/bge-small-zh-v1.5`）。余弦很高但 3-gram 距离大于 8 时保留，避免误伤复述。换嵌入、度量或语料后必须重标
+- **近似去重**：精确哈希跳过保持不变。SimHash 64 位、汉明距离 `<= 3` 才不写第二份文档索引，并记 `duplicate_of`。余弦 `>= 0.95` 只有在汉明距离也 `<= 3` 时才算同一份副本，避免把未声明的冲突折叠掉。切块同样不写第二份向量；如果一篇里只丢掉一部分切块，入库报告记在 `partial`，不算完整成功。检索先折叠这种副本，再 MMR（λ 默认 0.7），然后才是原来的重排。声明了关系或 `allow_near_duplicate` 的文档不会被当成冗余副本。自动合并只发生在精确哈希
+- **阈值未重标**：余弦 0.95、汉明距离 3、MMR λ 0.7、邻居余弦 0.80 是文档化默认值，按 L2 归一化向量理解（默认嵌入 `BAAI/bge-small-zh-v1.5`）。余弦很高但 3-gram 距离大于 3 时不跳过、不折叠，避免吞掉未声明的冲突或复述。换嵌入、度量或语料后必须重标
 - **评测集**：`eval/datasets/near_miss.jsonl`（12）、`conflict.jsonl`（6）、`expiry.jsonl`（6）。`kb eval --mode near_miss|conflict|expiry` 会临时入库数据集里的笔记，跑完删除。没有 LLM key 时部分覆盖识别率记为跳过（-1）；冲突呈现和过期排除不依赖模型。原有 `refusal` 模式还在
 - **没有做**：题库去重、`mentions` / `items` / `reports` / `concept_pages`、一等历史查询、embedding 迁移演练
 
@@ -60,7 +60,7 @@
 
 ## 2. 当前验证
 
-- 全量测试：**218 passed**（2026-11-11，含 P2）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即本分支起点 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
+- 全量测试：**226 passed**（2026-11-11，含 P2 返工）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即本分支起点 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
 - `STRUCTURE.md` 已补上源文件回读与父全文迁移相关文件
 - 测试历史：本地 `test_history.log`（已 gitignore，不随仓库发布）
 

@@ -21,17 +21,16 @@ from typing import Any
 # 与 Settings 默认值保持一致，方便测试和文档引用。改默认值时两处一起改。
 DEFAULT_COSINE = 0.95
 DEFAULT_HAMMING = 3
-# 余弦达到去重线时，SimHash 汉明距离还得不超过这个值，才算同一份副本。
-# 距离更大说明 n-gram 已经不同，按复述保留，不因为向量碰巧接近就丢掉。
-DEFAULT_COSINE_HAMMING = 8
+# 余弦达到去重线时，SimHash 还得落在这个距离内，才当成同一份副本。
+# 只改了一个数字或一句结论时，汉明距离通常更大，不能因此丢掉未声明的冲突。
+DEFAULT_COSINE_HAMMING = 3
 DEFAULT_MMR_LAMBDA = 0.7
 DEFAULT_NEIGHBOR_COSINE = 0.80
 
 RETUNE_NOTE = (
-    "余弦 0.95、SimHash 汉明距离 3、余弦去重的汉明距离上限 8、MMR λ 0.7、"
-    "邻居余弦 0.80 是文档化默认值，按 L2 归一化后的向量理解"
-    "（当前默认嵌入是 BAAI/bge-small-zh-v1.5）。"
-    "余弦单独很高、但 3-gram 汉明距离大于 8 时不当成重复，避免误伤复述。"
+    "余弦 0.95、SimHash 汉明距离 3、MMR λ 0.7、邻居余弦 0.80 是文档化默认值，"
+    "按 L2 归一化后的向量理解（当前默认嵌入是 BAAI/bge-small-zh-v1.5）。"
+    "余弦很高但 3-gram 汉明距离大于 3 时不折叠、不跳过入库，避免误伤未声明的冲突或复述。"
     "这次没有用标注重复集重标。换嵌入模型、度量或语料后，这些数都会失效，必须重标。"
 )
 

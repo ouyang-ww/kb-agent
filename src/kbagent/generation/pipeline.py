@@ -11,7 +11,7 @@ from typing import Any
 from ..config import Settings
 from ..errors import LLMError
 from ..models import Answer, SourceRef
-from ..retrieval.governance_pass import finish_hits, shape_hits
+from ..retrieval.governance_pass import RetrievalPolicy, finish_hits, shape_hits
 from ..retrieval.parent_expander import ContextItem, ParentExpander
 from ..storage.filters import Where
 from .answerability import (
@@ -121,6 +121,14 @@ class RAGPipeline:
             collection=collection_name,
             embedder=self.retriever.embedder,
             top_k=top_k,
+            policy=RetrievalPolicy(
+                include_hidden=include_hidden,
+                include_expired=include_expired,
+                as_of=as_of,
+                default_scope=self.settings.default_scope,
+                doc_visible=None if include_hidden else self.retriever.doc_visibility,
+                doc_dates=None if include_expired else self.retriever.doc_dates,
+            ),
             cosine_threshold=float(self.settings.near_dup_cosine),
             hamming_guard=int(self.settings.near_dup_cosine_hamming),
             mmr_lambda=float(self.settings.mmr_lambda),

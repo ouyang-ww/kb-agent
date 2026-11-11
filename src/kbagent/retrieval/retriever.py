@@ -9,8 +9,10 @@ from ..config import Settings
 from ..errors import KBError
 from ..governance.scope import visibility_filter, visibility_is_enforced
 from ..governance.validity import (
+    chunk_has_valid_until,
     display_day,
     earlier_deadline,
+    expiry_is_enforced,
     expiry_note,
     is_expired,
     resolve_as_of,
@@ -90,6 +92,9 @@ class Retriever:
             if not isinstance(doc_id, str):
                 doc_id = str(doc_id)
             doc_until, doc_verified = self._doc_dates(doc_id)
+            if not include_expired and not chunk_has_valid_until(meta.get("valid_until")):
+                # 缺字段不能当成「永不过期」。include_expired 才是显式旁路。
+                continue
             until = earlier_deadline(display_day(meta.get("valid_until")), doc_until)
             verified = str(meta.get("last_verified") or doc_verified or "")
             if not include_expired and is_expired(until or doc_until, as_of_day):
@@ -141,20 +146,28 @@ class Retriever:
         as_of: str | None = None,
     ) -> Where:
         if include_hidden:
-            # scope/status 的显式旁路保持调用方传入的 where（常常是 None）。
-            # 过期不靠这道 where，而在命中上按日期丢掉，除非 include_expired。
-            return where
-        merged = and_where(where, visibility_filter(self.settings.default_scope))
-        if not visibility_is_enforced(merged):
-            raise KBError(
-                "检索缺少 scope/status 过滤，已拒绝执行。"
-                "默认检索只接受 status=active 且 scope 在允许列表里的切块；"
-                "缺 scope 或空 scope 不会返回。只有显式 include_hidden=True 可以关闭这道过滤。"
-            )
+            # scope/status 的显式旁路不把可见性写进 where。
+            # 时效仍然要在，除非调用方同时给了 include_expired。
+            merged = where
+        else:
+            merged = and_where(where, visibility_filter(self.settings.default_scope))
+            if not visibility_is_enforced(merged):
+                raise KBError(
+                    "检索缺少 scope/status 过滤，已拒绝执行。"
+                    "默认检索只接受 status=active 且 scope 在允许列表里的切块；"
+                    "缺 scope 或空 scope 不会返回。只有显式 include_hidden=True 可以关闭这道过滤。"
+                )
         if include_expired:
             return merged
-        # 切块必须写着整数 valid_until（未设置的用 99991231）。缺字段的旧切块不会命中。
-        return and_where(merged, validity_filter(as_of))
+        merged = and_where(merged, validity_filter(as_of))
+        if not expiry_is_enforced(merged):
+            raise KBError(
+                "检索缺少 valid_until 过滤，已拒绝执行。"
+                "默认检索要求切块带 valid_until，并且不早于比较日。"
+                "缺这个字段不会被当成永不过期，旧切块要先跑 kb governance backfill。"
+                "只有显式 include_expired=True 可以关闭这道过滤。"
+            )
+        return merged
 
     def _is_visible_hit(self, hit: VectorHit) -> bool:
         doc_id = (hit.metadata or {}).get("doc_id", "")

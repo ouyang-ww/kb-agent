@@ -137,7 +137,8 @@ class Settings(BaseSettings):
     near_dup_cosine: float = 0.95
     near_dup_hamming: int = 3
     # 余弦已经 >= near_dup_cosine 时，SimHash 距离还要 <= 这个值才当成副本。
-    near_dup_cosine_hamming: int = 8
+    # 默认与 KB_NEAR_DUP_HAMMING 相同：只改结论、汉明距离更大的文档不会被吞掉。
+    near_dup_cosine_hamming: int = 3
     mmr_lambda: float = 0.7
     relation_neighbor_cosine: float = 0.80
 

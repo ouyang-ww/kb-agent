@@ -233,7 +233,7 @@ def _hit(chunk_id: str, doc_id: str, score: float):
     return VectorHit(
         id=chunk_id,
         document=doc_id,
-        metadata={"doc_id": doc_id, "title": doc_id},
+        metadata={"doc_id": doc_id, "title": doc_id, "valid_until": 99991231},
         score=score,
     )
 

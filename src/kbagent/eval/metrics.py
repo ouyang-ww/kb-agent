@@ -55,6 +55,26 @@ def refusal_recall(refused: list[bool]) -> float:
     return sum(1.0 for flag in refused if flag) / len(refused)
 
 
+def acknowledges_missing_points(
+    text: str, meta: dict | None, points: list[str]
+) -> bool:
+    """预期的缺失点必须出现在答案或 gaps 里。弱证据提示本身不算承认。"""
+    if not points:
+        return False
+    info = meta or {}
+    parts = [text or ""]
+    gaps = info.get("gaps") or []
+    if isinstance(gaps, list):
+        parts.extend(str(item) for item in gaps)
+    verification = info.get("verification") or {}
+    if isinstance(verification, dict):
+        extra = verification.get("gaps") or []
+        if isinstance(extra, list):
+            parts.extend(str(item) for item in extra)
+    haystack = "\n".join(parts)
+    return all(str(point) and str(point) in haystack for point in points)
+
+
 def partial_coverage_recognized(text: str, meta: dict | None = None) -> bool:
     """答案有没有承认资料只覆盖了一部分。不调用裁判。"""
     info = meta or {}

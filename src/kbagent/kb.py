@@ -25,7 +25,7 @@ from .governance.vectors import sync_chunk_governance
 from .governance.originals import RE_INGEST_HINT, migrate_document
 from .ingestion.indexer import IngestReport, Indexer
 from .models import Answer, Document, RetrievalHit
-from .retrieval.governance_pass import finish_hits, shape_hits
+from .retrieval.governance_pass import RetrievalPolicy, finish_hits, shape_hits
 from .retrieval.parent_expander import ParentExpander
 from .retrieval.query_processor import QueryProcessor
 from .retrieval.reranker import Reranker
@@ -659,6 +659,14 @@ class KnowledgeBase:
             collection=collection_name,
             embedder=self._embedder,
             top_k=top_k,
+            policy=RetrievalPolicy(
+                include_hidden=include_hidden,
+                include_expired=include_expired,
+                as_of=as_of,
+                default_scope=self.settings.default_scope,
+                doc_visible=None if include_hidden else self._is_doc_visible,
+                doc_dates=None if include_expired else self._doc_dates,
+            ),
             cosine_threshold=float(self.settings.near_dup_cosine),
             hamming_guard=int(self.settings.near_dup_cosine_hamming),
             mmr_lambda=float(self.settings.mmr_lambda),

@@ -37,7 +37,7 @@ from ..governance.scope import visibility_filter
 from ..governance.validity import (
     chunk_valid_until,
     is_expired,
-    normalize_day,
+    parse_explicit_day,
     validity_filter,
 )
 from ..governance.vectors import sync_chunk_governance
@@ -98,10 +98,12 @@ class IngestReport:
     failed: list[dict] = field(default_factory=list)
     # 近似重复：没有写入第二份索引，只记下 duplicate_of。精确哈希跳过不记在这里。
     duplicates: list[dict] = field(default_factory=list)
+    # 只写入了一部分切块。不算完整成功。
+    partial: list[dict] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.failed
+        return not self.failed and not self.partial
 
 
 def _source_kind(source_path: str, requested: str | None) -> str:
@@ -174,6 +176,7 @@ class Indexer:
         # 与文档库同一文件、独立连接。删除/替换向量之前先提交一行日志。
         self.journal = IngestJournal(settings.documents_db)
         self._last_skip: dict | None = None
+        self._partial_index: dict | None = None
 
     # ---- 入口 ----
     def ingest_path(
@@ -194,7 +197,10 @@ class Indexer:
                     if scope:
                         raw["scope"] = scope
                     doc_id = self._ingest_raw(raw, force=force)
-                    if doc_id:
+                    if doc_id and self._partial_index:
+                        report.partial.append(dict(self._partial_index))
+                        report.added.append(doc_id)
+                    elif doc_id:
                         report.added.append(doc_id)
                     else:
                         report.skipped.append(str(f))
@@ -283,6 +289,8 @@ class Indexer:
     # ---- 核心 ----
     def _ingest_raw(self, raw: dict, force: bool) -> str | None:
         self._last_skip = None
+        self._partial_index = None
+        self._chunk_skips = []
         collection = raw.get("collection") or self.settings.default_collection
         source_path = raw.get("source_path", "") or ""
         title = raw.get("title", "untitled")
@@ -456,6 +464,18 @@ class Indexer:
                 return None
 
         kept_embedding = mean_pool(embeddings)
+        if self._chunk_skips and ids:
+            self._partial_index = {
+                "doc_id": doc_id,
+                "indexed_chunks": len(ids),
+                "skipped_chunks": list(self._chunk_skips),
+            }
+            logger.warning(
+                "文档 %s 只写入了 %s 个切块，另有 %s 个近似重复切块未建索引",
+                doc_id,
+                len(ids),
+                len(self._chunk_skips),
+            )
 
         now = _utcnow()
         # 绑定原件只留在文件系统。inline / orphaned_copy 才把正文写入应用库。
@@ -991,10 +1011,15 @@ class Indexer:
 
         def pick(key: str):
             if key in meta:
-                return normalize_day(meta.get(key))
-            if prior is not None:
-                return normalize_day(getattr(prior, key, None))
-            return None
+                raw = meta.get(key)
+            elif prior is not None:
+                raw = getattr(prior, key, None)
+            else:
+                return None
+            try:
+                return parse_explicit_day(raw, key)
+            except Exception as exc:
+                raise IngestError(str(exc)) from exc
 
         return {
             "valid_from": pick("valid_from"),
@@ -1159,6 +1184,13 @@ class Indexer:
             )
             if match is not None:
                 other, score = match
+                self._chunk_skips.append(
+                    {
+                        "chunk_id": ids[index],
+                        "duplicate_of": other,
+                        "score": score,
+                    }
+                )
                 self._remember_duplicate("chunk", ids[index], other, "cosine", score)
                 continue
             kept_ids.append(ids[index])

@@ -16,11 +16,11 @@ from ..generation.answerability import is_refusal_text
 from .dataset import EvalItem
 from .judge import LLMJudge
 from .metrics import (
+    acknowledges_missing_points,
     aggregate,
     conflict_presentation_rate,
     expiry_exclusion_rate,
     expiry_label_rate,
-    partial_coverage_recognized,
     refusal_recall,
 )
 
@@ -270,7 +270,9 @@ class Evaluator:
         row["refusal_reason"] = ans.meta.get("refusal_reason")
         row["gaps"] = ans.meta.get("gaps") or []
         row["conflict"] = bool(ans.meta.get("conflict")) or ("存在两种说法" in (ans.text or ""))
-        row["partial"] = partial_coverage_recognized(ans.text, ans.meta)
+        row["partial"] = acknowledges_missing_points(
+            ans.text, ans.meta, list(item.missing_points)
+        )
         row["sources"] = [source.doc_id for source in ans.sources]
         return row
 

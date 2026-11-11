@@ -88,6 +88,66 @@ def day_number(value: object) -> int | None:
     return int(day.replace("-", ""))
 
 
+def chunk_has_valid_until(value: object) -> bool:
+    """切块是否写了截止日期。缺字段、空串都不算；开放哨兵算。"""
+    value = _as_number(value)
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return int(value) > 0
+    text = str(value).strip()
+    if not text:
+        return False
+    if text == OPEN_ENDED:
+        return True
+    return normalize_day(text) is not None
+
+
+def parse_explicit_day(value: object, field: str) -> str | None:
+    """入库用。空和开放哨兵表示未设置。非空但不是合法日期则拒绝。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text == OPEN_ENDED:
+        return None
+    day = normalize_day(text)
+    if day is None:
+        raise KBError(f"{field} 无法解析为 YYYY-MM-DD：{text}")
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError as exc:
+        raise KBError(f"{field} 无法解析为 YYYY-MM-DD：{text}") from exc
+    return day
+
+
+def expiry_is_enforced(where) -> bool:
+    """合并后的过滤是否要求 valid_until 不早于某个正的比较日。
+
+    和 scope 的允许列表一样：这道条件不在 AND 链上，就不能做默认检索。
+    """
+    from ..storage.filters import Filter, normalize_filter
+
+    filt = where if isinstance(where, Filter) else normalize_filter(where)
+    if not filt:
+        return False
+    for cond in _and_conditions(filt):
+        if cond.field != "valid_until" or cond.op not in ("gte", "gt"):
+            continue
+        try:
+            if float(cond.value) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _and_conditions(filt) -> list:
+    found = list(filt.conditions)
+    for sub in getattr(filt, "conjuncts", ()) or ():
+        found.extend(_and_conditions(sub))
+    return found
+
+
 def chunk_valid_until(value: object) -> int:
     """写入切块的截止日期。空值用开放哨兵，方便向量 where 做数值比较。"""
     return day_number(value) or OPEN_ENDED_ORD

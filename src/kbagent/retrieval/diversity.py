@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from ..governance.near_dup import DEFAULT_COSINE, DEFAULT_MMR_LAMBDA, cosine, hamming, simhash64
+from ..governance.near_dup import DEFAULT_COSINE, DEFAULT_COSINE_HAMMING, DEFAULT_MMR_LAMBDA, cosine, hamming, simhash64
 from ..models import RetrievalHit
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def select_diverse(
     *,
     k: int,
     cosine_threshold: float = DEFAULT_COSINE,
-    hamming_guard: int = 8,
+    hamming_guard: int = DEFAULT_COSINE_HAMMING,
     mmr_lambda: float = DEFAULT_MMR_LAMBDA,
     protected_pairs: set[frozenset[str]] | None = None,
 ) -> list[RetrievalHit]:
@@ -100,7 +100,7 @@ def _fold(
         key=lambda i: (
             -hits[i].score,
             -int(hits[i].authority or 0),
-            hits[i].last_verified or "",
+            _recency_key(hits[i].last_verified),
         ),
     )
     kept: list[RetrievalHit] = []
@@ -113,6 +113,24 @@ def _fold(
         kept.append(hit)
         kept_vecs.append(vec)
     return kept, kept_vecs
+
+
+def _recency_key(value: str) -> tuple[int, str]:
+    """空的 last_verified 排在后面。有日期时，越新越靠前。
+
+    升序排序里用「是否缺失」加逐位取反的日期，让 2024 排在 2020 前面，
+    空串排在所有日期后面。
+    """
+    text = (value or "").strip()
+    if not text:
+        return (1, "")
+    inverted = []
+    for ch in text:
+        if ch.isdigit():
+            inverted.append(str(9 - int(ch)))
+        else:
+            inverted.append(ch)
+    return (0, "".join(inverted))
 
 
 def _absorbed(
