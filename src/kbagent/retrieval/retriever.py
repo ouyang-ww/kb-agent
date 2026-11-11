@@ -8,6 +8,15 @@ from typing import Callable
 from ..config import Settings
 from ..errors import KBError
 from ..governance.scope import visibility_filter, visibility_is_enforced
+from ..governance.validity import (
+    display_day,
+    earlier_deadline,
+    expiry_note,
+    is_expired,
+    resolve_as_of,
+    today_utc,
+    validity_filter,
+)
 from ..models import MediaRef, RetrievalHit
 from ..storage.filters import Where, and_where
 from ..vectorstore.base import VectorHit, VectorStore
@@ -35,11 +44,14 @@ class Retriever:
         vector_store: VectorStore,
         settings: Settings,
         doc_visibility: Callable[[str], bool] | None = None,
+        doc_dates: Callable[[str], tuple[str | None, str | None]] | None = None,
     ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store
         self.settings = settings
         self.doc_visibility = doc_visibility
+        # (valid_until, last_verified)。文档行是向量 where 之外的第二道。
+        self.doc_dates = doc_dates
 
     def search(
         self,
@@ -48,11 +60,19 @@ class Retriever:
         where: Where = None,
         collection: str | None = None,
         include_hidden: bool = False,
+        include_expired: bool = False,
+        as_of: str | None = None,
     ) -> list[RetrievalHit]:
         collection = collection or self.settings.default_collection
+        as_of_day = resolve_as_of(as_of)
         # 不带过滤器时补上 scope/status，补不上就拒绝，不能静默搜全库。
-        # include_hidden=True 是唯一的显式旁路。
-        where = self._scoped_where(where, include_hidden)
+        # include_hidden=True 是 scope/status 的显式旁路，不过期过滤仍然默认开着。
+        where = self._scoped_where(
+            where,
+            include_hidden,
+            include_expired=include_expired,
+            as_of=as_of_day,
+        )
         qv = self.embedder.embed_query(query)
         # 向量 where 先排除 hidden/private，避免它们占满近邻。
         # 文档行和治理元数据是第二道：切块状态过期时仍然丢掉不可见命中。
@@ -62,13 +82,29 @@ class Retriever:
         else:
             results = self.vector_store.query(collection, qv, top_k, where)
         hits: list[RetrievalHit] = []
+        today = today_utc()
         for r in results:
             meta: dict = r.metadata or {}
             media = MediaRef.from_metadata(meta)
+            doc_id = meta.get("doc_id", "") or ""
+            if not isinstance(doc_id, str):
+                doc_id = str(doc_id)
+            doc_until, doc_verified = self._doc_dates(doc_id)
+            until = earlier_deadline(display_day(meta.get("valid_until")), doc_until)
+            verified = str(meta.get("last_verified") or doc_verified or "")
+            if not include_expired and is_expired(until or doc_until, as_of_day):
+                continue
+            note = ""
+            if is_expired(until or doc_until, today):
+                note = expiry_note(until or doc_until, verified)
+            try:
+                authority = int(meta.get("authority", 3))
+            except (TypeError, ValueError):
+                authority = 3
             hits.append(
                 RetrievalHit(
                     chunk_id=r.id,
-                    doc_id=meta.get("doc_id", ""),
+                    doc_id=doc_id,
                     text=r.document,
                     score=float(r.score),
                     title=meta.get("title", ""),
@@ -78,12 +114,35 @@ class Retriever:
                     collection=collection,
                     char_start=_meta_offset(meta, "char_start"),
                     char_end=_meta_offset(meta, "char_end"),
+                    valid_until=until or display_day(meta.get("valid_until")),
+                    last_verified=verified,
+                    authority=authority,
+                    note=note,
                 )
             )
         return hits
 
-    def _scoped_where(self, where: Where, include_hidden: bool) -> Where:
+    def _doc_dates(self, doc_id: str) -> tuple[str | None, str | None]:
+        if self.doc_dates is None or not doc_id:
+            return None, None
+        try:
+            until, verified = self.doc_dates(doc_id)
+        except Exception:
+            logger.warning("读取文档 %s 的时效失败", doc_id, exc_info=True)
+            return None, None
+        return until, verified
+
+    def _scoped_where(
+        self,
+        where: Where,
+        include_hidden: bool,
+        *,
+        include_expired: bool = False,
+        as_of: str | None = None,
+    ) -> Where:
         if include_hidden:
+            # scope/status 的显式旁路保持调用方传入的 where（常常是 None）。
+            # 过期不靠这道 where，而在命中上按日期丢掉，除非 include_expired。
             return where
         merged = and_where(where, visibility_filter(self.settings.default_scope))
         if not visibility_is_enforced(merged):
@@ -92,7 +151,10 @@ class Retriever:
                 "默认检索只接受 status=active 且 scope 在允许列表里的切块；"
                 "缺 scope 或空 scope 不会返回。只有显式 include_hidden=True 可以关闭这道过滤。"
             )
-        return merged
+        if include_expired:
+            return merged
+        # 切块必须写着整数 valid_until（未设置的用 99991231）。缺字段的旧切块不会命中。
+        return and_where(merged, validity_filter(as_of))
 
     def _is_visible_hit(self, hit: VectorHit) -> bool:
         doc_id = (hit.metadata or {}).get("doc_id", "")

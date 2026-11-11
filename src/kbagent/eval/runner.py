@@ -15,7 +15,14 @@ from ..errors import LLMError
 from ..generation.answerability import is_refusal_text
 from .dataset import EvalItem
 from .judge import LLMJudge
-from .metrics import aggregate, refusal_recall
+from .metrics import (
+    aggregate,
+    conflict_presentation_rate,
+    expiry_exclusion_rate,
+    expiry_label_rate,
+    partial_coverage_recognized,
+    refusal_recall,
+)
 
 # 复合分权重（可配）
 DEFAULT_WEIGHTS = {
@@ -77,6 +84,9 @@ class Evaluator:
             result.metrics = self._aggregate(per_item, top_k, mode)
             result.warnings = self._redlines(result.metrics, mode)
             return result
+
+        if mode in {"near_miss", "conflict", "expiry"}:
+            return self._run_governance(items, mode, result, top_k, rerank, rewrite, collection)
 
         for item in items:
             row: dict[str, Any] = {
@@ -169,6 +179,186 @@ class Evaluator:
         row["rerank_fallback"] = bool(ans.meta.get("rerank_fallback"))
         row["refused"] = bool(ans.meta.get("refusal_reason")) or is_refusal_text(ans.text)
         return row
+
+    def _run_governance(
+        self,
+        items: list[EvalItem],
+        mode: str,
+        result: EvalResult,
+        top_k: int,
+        rerank: bool | None,
+        rewrite: bool | None,
+        collection: str | None,
+    ) -> EvalResult:
+        """近邻陷阱 / 冲突 / 过期。笔记写在数据集里，跑完删掉。
+
+        没有 LLM key 时，部分覆盖识别率记为跳过（-1）。冲突呈现和过期排除
+        不依赖模型：冲突句和过期标注是检索之后确定性加上的。
+        """
+        per_item: list[dict] = []
+        created: list[str] = []
+        try:
+            for item in items:
+                per_item.append(
+                    self._governance_row(
+                        item, mode, top_k, rerank, rewrite, collection, created
+                    )
+                )
+        finally:
+            for doc_id in created:
+                try:
+                    self.kb.delete_document(doc_id, include_hidden=True)
+                except Exception:
+                    continue
+        result.per_item = per_item
+        result.metrics = self._governance_metrics(per_item, mode)
+        result.warnings = self._redlines(result.metrics, mode)
+        return result
+
+    def _governance_row(
+        self,
+        item: EvalItem,
+        mode: str,
+        top_k: int,
+        rerank: bool | None,
+        rewrite: bool | None,
+        collection: str | None,
+        created: list[str],
+    ) -> dict[str, Any]:
+        ids = self._ingest_eval_docs(item, collection, created)
+        self._confirm_eval_relations(item, ids)
+        row: dict[str, Any] = {
+            "query": item.query,
+            "category": item.category or mode,
+            "doc_ids": ids,
+            "missing_points": list(item.missing_points),
+        }
+        if mode == "expiry":
+            expired_id = self._expired_doc_id(item, ids)
+            row["expired_doc_id"] = expired_id
+            hits = self.kb.search(
+                item.query,
+                top_k=top_k,
+                rerank=rerank,
+                rewrite=rewrite,
+                collection=collection,
+            )
+            found = {hit.doc_id for hit in hits}
+            row["retrieved_doc_ids"] = list(dict.fromkeys(hit.doc_id for hit in hits))
+            row["expired_excluded"] = bool(expired_id) and expired_id not in found
+            revealed = self.kb.search(
+                item.query,
+                top_k=max(top_k, len(ids) or 1),
+                rerank=rerank,
+                rewrite=rewrite,
+                collection=collection,
+                include_expired=True,
+            )
+            row["expired_labeled"] = bool(expired_id) and any(
+                hit.note for hit in revealed if hit.doc_id == expired_id
+            )
+            return row
+
+        ans = self.kb.ask(
+            item.query,
+            top_k=top_k,
+            rerank=rerank,
+            rewrite=rewrite,
+            collection=collection,
+        )
+        row["answer"] = ans.text
+        row["refusal_reason"] = ans.meta.get("refusal_reason")
+        row["gaps"] = ans.meta.get("gaps") or []
+        row["conflict"] = bool(ans.meta.get("conflict")) or ("存在两种说法" in (ans.text or ""))
+        row["partial"] = partial_coverage_recognized(ans.text, ans.meta)
+        row["sources"] = [source.doc_id for source in ans.sources]
+        return row
+
+    def _ingest_eval_docs(
+        self, item: EvalItem, collection: str | None, created: list[str]
+    ) -> list[str]:
+        ids: list[str] = []
+        for doc in item.documents:
+            if not isinstance(doc, dict):
+                ids.append("")
+                continue
+            metadata = dict(doc.get("metadata") or {})
+            metadata.setdefault("allow_near_duplicate", True)
+            doc_id = self.kb.ingest_text(
+                str(doc.get("content") or ""),
+                title=str(doc.get("title") or "eval"),
+                collection=collection,
+                metadata=metadata,
+            )
+            ids.append(doc_id or "")
+            if doc_id:
+                created.append(doc_id)
+        return ids
+
+    def _confirm_eval_relations(self, item: EvalItem, ids: list[str]) -> None:
+        for rel in item.relations:
+            if not isinstance(rel, dict):
+                continue
+            try:
+                src = ids[int(rel.get("src", 0))]
+                dst = ids[int(rel.get("dst", 1))]
+            except (IndexError, TypeError, ValueError):
+                continue
+            rel_type = str(rel.get("type") or "")
+            if not src or not dst or not rel_type:
+                continue
+            self.kb.propose_relation(src, dst, rel_type, created_by="eval")
+            if rel.get("confirm", True):
+                self.kb.confirm_relation(src, dst, rel_type, actor="eval")
+
+    @staticmethod
+    def _expired_doc_id(item: EvalItem, ids: list[str]) -> str:
+        if item.expired_index is not None:
+            try:
+                return ids[int(item.expired_index)]
+            except (IndexError, TypeError, ValueError):
+                return ""
+        for index, doc in enumerate(item.documents):
+            if not isinstance(doc, dict):
+                continue
+            metadata = doc.get("metadata") or {}
+            if isinstance(metadata, dict) and metadata.get("valid_until"):
+                return ids[index] if index < len(ids) else ""
+        return ""
+
+    def _governance_metrics(self, per_item: list[dict], mode: str) -> dict[str, float]:
+        total = float(len(per_item))
+        if mode == "near_miss":
+            if not (self.settings.llm_api_key or "").strip():
+                return {
+                    "partial_coverage_rate": -1.0,
+                    "skipped": 1.0,
+                    "total": total,
+                }
+            flags = [bool(row.get("partial")) for row in per_item]
+            recognized = float(sum(flags))
+            rate = recognized / total if total else 0.0
+            return {
+                "partial_coverage_rate": round(rate, 4),
+                "recognized": recognized,
+                "total": total,
+            }
+        if mode == "conflict":
+            flags = [bool(row.get("conflict")) for row in per_item]
+            return {
+                "conflict_presentation_rate": round(conflict_presentation_rate(flags), 4),
+                "presented": float(sum(flags)),
+                "total": total,
+            }
+        flags = [bool(row.get("expired_excluded")) for row in per_item]
+        labels = [bool(row.get("expired_labeled")) for row in per_item]
+        return {
+            "expiry_exclusion_rate": round(expiry_exclusion_rate(flags), 4),
+            "expiry_label_rate": round(expiry_label_rate(labels), 4),
+            "excluded": float(sum(flags)),
+            "labeled": float(sum(labels)),
+            "total": total,
+        }
 
     # ---- 对比实验 ----
     def compare(
@@ -270,6 +460,24 @@ class Evaluator:
             val = metrics.get("refusal_recall", -1)
             if val >= 0 and val < 0.9:
                 warnings.append(f"红线告警: refusal_recall={val} < 0.9")
+            return warnings
+        if mode == "near_miss":
+            val = metrics.get("partial_coverage_rate", -1)
+            if val < 0:
+                warnings.append("部分覆盖识别率已跳过：没有 LLM key")
+            elif val < 0.5:
+                warnings.append(f"红线告警: partial_coverage_rate={val} < 0.5")
+            return warnings
+        if mode == "conflict":
+            val = metrics.get("conflict_presentation_rate", -1)
+            if val >= 0 and val < 1.0:
+                warnings.append(f"红线告警: conflict_presentation_rate={val} < 1.0")
+            return warnings
+        if mode == "expiry":
+            for key in ("expiry_exclusion_rate", "expiry_label_rate"):
+                val = metrics.get(key, -1)
+                if val >= 0 and val < 1.0:
+                    warnings.append(f"红线告警: {key}={val} < 1.0")
             return warnings
         if mode == "full":
             checks = [

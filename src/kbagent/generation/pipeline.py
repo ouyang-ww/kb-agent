@@ -11,6 +11,7 @@ from typing import Any
 from ..config import Settings
 from ..errors import LLMError
 from ..models import Answer, SourceRef
+from ..retrieval.governance_pass import finish_hits, shape_hits
 from ..retrieval.parent_expander import ContextItem, ParentExpander
 from ..storage.filters import Where
 from .answerability import (
@@ -25,8 +26,11 @@ from .citations import (
     downgrade_confidence,
 )
 from .llm import LLMClient
+from .verification import LLMClaimVerifier, Verification, verify_answer
 
 logger = logging.getLogger(__name__)
+
+CONFLICT_NOTE = "存在两种说法，下列来源互相矛盾，请分别查看，不要合并成一种结论。"
 
 
 class RAGPipeline:
@@ -38,6 +42,7 @@ class RAGPipeline:
         retriever,
         reranker,
         parent_expander: ParentExpander,
+        governance=None,
     ) -> None:
         self.settings = settings
         self.llm = llm
@@ -45,6 +50,9 @@ class RAGPipeline:
         self.retriever = retriever
         self.reranker = reranker
         self.parent_expander = parent_expander
+        self.governance = governance
+        # 测试可以换成假的校验器。生产环境留空，有 key 时用 LLM。
+        self.verifier = None
 
     def ask(
         self,
@@ -56,6 +64,8 @@ class RAGPipeline:
         rewrite: bool | None = None,
         intent: bool | None = None,
         include_hidden: bool = False,
+        include_expired: bool = False,
+        as_of: str | None = None,
     ) -> Answer:
         top_k = top_k or self.settings.top_k
         rerank_on = self.settings.rerank_enabled if rerank is None else rerank
@@ -100,14 +110,29 @@ class RAGPipeline:
             where=where,
             collection=collection,
             include_hidden=include_hidden,
+            include_expired=include_expired,
+            as_of=as_of,
+        )
+        collection_name = collection or self.settings.default_collection
+        diverse, prepared, conflict_pairs = shape_hits(
+            candidates,
+            governance=self.governance,
+            vector_store=self.retriever.vector_store,
+            collection=collection_name,
+            embedder=self.retriever.embedder,
+            top_k=top_k,
+            cosine_threshold=float(self.settings.near_dup_cosine),
+            hamming_guard=int(self.settings.near_dup_cosine_hamming),
+            mmr_lambda=float(self.settings.mmr_lambda),
         )
         rerank_error = None
         if rerank_on:
-            hits = self.reranker.rerank(plan.rewritten_query, candidates, top_k=top_k)
+            hits = self.reranker.rerank(plan.rewritten_query, diverse, top_k=top_k)
             if hits and hits[0].rerank_error:
                 rerank_error = hits[0].rerank_error
         else:
-            hits = candidates[:top_k]
+            hits = diverse[:top_k]
+        hits = finish_hits(hits, prepared, conflict_pairs)
 
         if not hits:
             return self._refuse(
@@ -159,12 +184,25 @@ class RAGPipeline:
             return self._refuse(checked.text, sources, meta)
 
         text = checked.text
+        verified = self._verify_claims(text, context)
+        if verified is not None:
+            meta["verification"] = verified.as_meta()
+            meta["gaps"] = list(verified.gaps)
+            if verified.downgraded:
+                meta["confidence"] = "low"
+                meta["refusal_reason"] = "unverified_claims"
+                meta["answerability"] = "refuse"
+                return self._refuse(verified.text, sources, meta)
+            if verified.skipped is None:
+                text = verified.text
+
         meta["confidence"] = downgrade_confidence(
             decision.confidence, checked.confidence_steps
         )
         if decision.action == "weak" and not is_refusal_text(text):
             text = f"{text}\n\n{WEAK_EVIDENCE_HINT}"
             meta["confidence"] = "low"
+        text = self._annotate(text, sources, conflict_pairs, meta)
         meta["refusal_reason"] = None
         return Answer(text=text, sources=sources, meta=meta)
 
@@ -178,9 +216,51 @@ class RAGPipeline:
                 snippet=c.text[:200],
                 section=c.section,
                 media=c.media,
+                note=c.note,
             )
             for c in context
         ]
+
+    def _verify_claims(self, text: str, context: list[ContextItem]) -> Verification | None:
+        """严格模式才跑。没有 key、也没有注入校验器时跳过，不改已经通过的闸 1 / 闸 2。"""
+        if not self.settings.answer_strict:
+            return None
+        if is_refusal_text(text):
+            return None
+        verifier = self.verifier
+        if verifier is None and not (self.settings.llm_api_key or "").strip():
+            return Verification(text=text, skipped="no_llm_key")
+        if verifier is None:
+            verifier = LLMClaimVerifier(self.llm)
+        snippets = [item.text for item in context]
+        return verify_answer(
+            text,
+            snippets,
+            verifier,
+            max_fail_rate=float(self.settings.answer_strict_max_fail_rate),
+        )
+
+    def _annotate(
+        self,
+        text: str,
+        sources: list[SourceRef],
+        conflict_pairs: set[frozenset[str]],
+        meta: dict[str, Any],
+    ) -> str:
+        present = {source.doc_id for source in sources if source.doc_id}
+        active = [pair for pair in conflict_pairs if pair <= present and len(pair) == 2]
+        if active:
+            meta["conflict"] = True
+            meta["conflict_pairs"] = [sorted(pair) for pair in active]
+            if "存在两种说法" not in text:
+                text = f"{text}\n\n{CONFLICT_NOTE}"
+        notes = [source.note for source in sources if source.note]
+        if notes:
+            meta["expired_sources"] = True
+            extra = " ".join(dict.fromkeys(notes))
+            if "可能已过时" not in text:
+                text = f"{text}\n\n{extra}"
+        return text
 
     def _refuse(self, text: str, sources: list[SourceRef], meta: dict[str, Any]) -> Answer:
         """拒答是正常输出：记原因和置信度，不抛异常。"""

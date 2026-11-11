@@ -1,10 +1,10 @@
 # 知识治理：可信、可控、可演进
 
-> 状态：**设计文档 + P0 骨架已实现（2026-10-30）+ P1 闸门 / 引用 / 库外集 / fail-closed scope / vector_index 消费者已落地（2026-11-10）**。与 [PLAN v4](../PLAN.md) 配套。
+> 状态：**设计文档 + P0 骨架已实现（2026-10-30）+ P1 闸门 / 引用 / 库外集 / fail-closed scope / vector_index 消费者已落地（2026-11-10）+ P2 闸 3 / 过期冲突 / 近似去重 / 三套评测集已落地（2026-11-11）**。与 [PLAN v4](../PLAN.md) 配套。
 > 本文的 P0 / P1 / P2 与 [status §5](./status.md) 的治理阶段同名同义。学习阶段叫 L2、S1–S4，不占用这套编号。
 > 配套：[愿景](./vision.md)、[L1→L3 最小可行闭环拆解](./mvp-l1-to-l3.md)、[知识图谱与本体学习笔记](./knowledge-graph-and-ontology.md)。
 > 覆盖五个问题：**防幻觉、隐藏与抽离、embedding 迁移、知识过期、知识重复。**
-> 实施状态：P0 治理表、scope、hide/unhide、日志、manifest、Key 分权已实现（2026-10-30）。P1 的闸 1、闸 2、库外拒答集、检索 fail-closed、`vector_index` 消费者已实现（2026-11-10）。`mentions` / `items` / `reports` 仍是游标占位。过期/冲突、闸 3 严格模式、近似去重待 P2。
+> 实施状态：P0 治理表、scope、hide/unhide、日志、manifest、Key 分权已实现（2026-10-30）。P1 的闸 1、闸 2、库外拒答集、检索 fail-closed、`vector_index` 消费者已实现（2026-11-10）。P2 的闸 3、过期/冲突、近似去重和近邻陷阱 / 冲突 / 过期评测集已实现（2026-11-11）。题库去重、一等历史查询、embedding 迁移演练仍未做。`mentions` / `items` / `reports` 仍是游标占位。
 
 ---
 
@@ -115,6 +115,8 @@ Prompt 约束：
 - 只在 `KB_ANSWER_STRICT=true` 时启用
 - 或按问题类型抽样（高影响、含数字/结论的问题）
 - 或先小模型初筛，可疑项再复核
+
+**P2 已落地。** 默认关闭。开启后把答案拆成句子，只按所引编号片段判断能否推出；推不出就删掉并写入 gaps。失败率高于 `KB_ANSWER_STRICT_MAX_FAIL_RATE`（默认 0.5，用严格大于比较），或一条都留不下来时，整题改成闸 1 的固定拒答句。校验结果写入 `answer_log.verification_json`。没有 LLM key 时跳过这一闸，不改闸 1 / 闸 2。按问题类型抽样还没有做。
 
 #### 闸 4：展示
 
@@ -427,6 +429,8 @@ WHERE status = 'active'
 - **排序**：同等相关时，优先 `authority` 高、`last_verified` 新
 - **冲突**：两条都返回，明确写"存在两种说法"
 
+**P2 已落地的检索规则。** 默认向量 `where` 在 P1 的 `status=active` 且 `scope $in` 之上，再要求整数 `valid_until >= 今天`（未设置写成 `99991231`，因为 Chroma 的 `$gte` 不接受日期字符串）。文档行是第二道。`valid_until` 当天仍有效。确认后的 `supersedes` 把旧文档标成 `superseded`，检索沿链到最新；pending 不改变结果。确认后的 `contradicts` 两边都返回，并写明存在两种说法。显式包含过期来源时标注时间。`as_of=YYYY-MM-DD` 只是比较日的最小钩子，一等历史查询仍是 P3。学习系统的题目隔离和周报没有做。
+
 ### 4.6 与学习系统联动
 
 - 题目的来源文档变为过期/被取代 → 题目 `quarantined`，重新生成
@@ -464,6 +468,8 @@ WHERE status = 'active'
 
 - 文档级重复 → 提示用户，不重复入库
 - 分块级重复 → 不重复写向量，保留 `duplicate_of` 映射（节省空间、避免 top-k 被占满）
+
+**P2 已落地。** 精确哈希跳过保持原样。SimHash 汉明距离 `<= 3`，或余弦 `>= 0.95` 且汉明距离 `<= 8`，不写第二份索引，只记 `near_duplicates.duplicate_of`。检索在重排之前按这个标准折叠，再做 MMR（λ 默认 0.7）。这些数是文档化默认值，不是这次语料上重标的；换嵌入后必须重标。声明了关系的文档不会被当成冗余副本。自动合并只发生在精确哈希。题库去重没有做。
 
 ### 5.3 检索时去重（容易被忽略）
 
@@ -556,7 +562,7 @@ CREATE TABLE consumer_cursor (
 3. 失败重试 + 退避；毒事件进 `dead_letter` 表并告警
 4. `kb repair` 可从任意 cursor 重放，保证最终一致
 
-**P1 已落地的只有 `vector_index`。** 它处理 hide / unhide / delete / pending_cleanup，把切块 status 写回去或删掉向量；失败记入 `consumer_dead_letter` 后跳过，避免一条毒事件堵住后面的隐藏。`kb governance drain` 会跑它。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只保留名字，游标停在 0，等对应模块出现后再从事件头重放。向量库和 SQLite 不在同一个事务里，处理必须幂等。
+**P1 已落地的只有 `vector_index`。** 它处理 hide / unhide / delete / pending_cleanup，以及确认关系时发出的 supersede / archive，把切块 status 写回去或删掉向量；失败记入 `consumer_dead_letter` 后跳过，避免一条毒事件堵住后面的隐藏。`kb governance drain` 会跑它。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只保留名字，游标停在 0，等对应模块出现后再从事件头重放。向量库和 SQLite 不在同一个事务里，处理必须幂等。
 
 ### 6.3 派生数据清单
 
@@ -600,7 +606,7 @@ CREATE TABLE audit_log (
 | --- | --- |
 | **P0（已完成 2026-10-30）** | `docs_meta`、`doc_events`、`consumer_cursor`、`content_hash`、scope 过滤、`embedding_manifest` + 指针、`answer_log`、`audit_log`、只读/admin Key、隐藏文档测试 ✅ |
 | **P1（2026-11-10）** | 闸 1、闸 2、库外拒答集（`refusal_recall`）、检索 fail-closed scope、`vector_index` 消费者 ✅。`mentions` / `items` / `reports` 仍是游标占位，不在本阶段造学习模块 |
-| **P2** | 闸 3 声明校验（严格模式）、过期检测与冲突队列、近似去重、题库去重 |
+| **P2（2026-11-11）** | 闸 3 声明校验（严格模式）、过期检测与冲突队列、近似去重、近邻陷阱 / 冲突 / 过期评测集 ✅。题库去重未做，等学习模块 |
 | **P3+** | 历史查询（as-of）、事实级共识、embedding 迁移演练、段落级隐藏 |
 
 **P0 的治理元数据是刚需**：如果先做题库再补 scope/时效/哈希，所有后续数据都要回填，成本高且容易漏。

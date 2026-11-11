@@ -69,7 +69,10 @@ kb config set study.enabled on             # 热切换，无需重启
 kb hide <doc_id> / kb unhide <doc_id>      # 隐藏 / 恢复文档
 kb events                                  # 治理事件
 kb answer-log / kb audit-log               # 答案日志 / 审计日志
-kb governance backfill                     # 旧文档 docs_meta 回填
+kb governance backfill                     # 旧文档 docs_meta 回填，并给旧切块补 scope/status/valid_until
+kb governance relations list --status pending
+kb governance relations confirm <src> <dst> supersedes
+kb governance relations reject <src> <dst> contradicts
 kb repair                                  # 对账向量与文档：恢复中断写入、清理孤儿向量
 ```
 
@@ -81,7 +84,7 @@ kb repair                                  # 对账向量与文档：恢复中�
 写入：loaders → cleaner → chunker(子 chunk 挂 doc_id) → 嵌入 → Chroma（切块）
       绑定来源的正文留在源文件，扩写时按路径回读
       旧库父全文：kb governance migrate-parents（见 ADR 0002）
-读取：意图识别 → query改写 → 检索top-N → 重排top-k → 父文档扩写 → 编号引用 → LLM → Answer
+读取：意图识别 → query改写 → 检索top-N → 折叠/MMR → 重排top-k → 父文档扩写 → 编号引用 → LLM → Answer
 ```
 
 - **子母切块**：向量库存切块（携带 `doc_id`）。绑定来源的整篇正文留在源文件，扩写时回读。旧库用 `kb governance migrate-parents` 迁出，见 [ADR 0002](docs/adr/0002-no-original-duplication.md)。
@@ -98,6 +101,10 @@ kb repair                                  # 对账向量与文档：恢复中�
 # 运行评估
 .venv/bin/kb eval --dataset eval/datasets/baseline.jsonl --mode retrieval
 .venv/bin/kb eval --dataset eval/datasets/baseline.jsonl --mode full
+.venv/bin/kb eval --mode refusal --dataset eval/datasets/out_of_kb.jsonl
+.venv/bin/kb eval --mode near_miss --dataset eval/datasets/near_miss.jsonl
+.venv/bin/kb eval --mode conflict --dataset eval/datasets/conflict.jsonl
+.venv/bin/kb eval --mode expiry --dataset eval/datasets/expiry.jsonl
 
 # 参数对比实验（rerank 开关 × top_k）
 .venv/bin/kb eval --mode retrieval --compare "rerank=on,off;top_k=3,5"
@@ -109,6 +116,7 @@ kb repair                                  # 对账向量与文档：恢复中�
 **指标**：
 - 检索：`recall@k`、`precision@k`、`hit_rate@k`、`mrr`、`ndcg@k`、检索延迟 p50/p95
 - 生成（LLM-as-judge）：`accuracy`（对照参考答案）、`faithfulness`（无幻觉率）、`relevance`、`citation_accuracy`、复合分
+- 治理：`refusal_recall`、`partial_coverage_rate`（无 LLM key 时跳过）、`conflict_presentation_rate`、`expiry_exclusion_rate`、`expiry_label_rate`
 - 红线：Recall@5 < 0.8 / Accuracy < 0.75 / Faithfulness < 0.9 输出告警
 - 报告输出到 `eval/reports/`（JSON + Markdown），建议每次改动跑回归对比
 

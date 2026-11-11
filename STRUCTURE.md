@@ -144,9 +144,9 @@ kb-agent/
 | --- | --- |
 | `src/kbagent/kb.py` | KnowledgeBase 门面（唯一业务入口，线程安全） |
 | `src/kbagent/ingestion/` | 写入链路：loaders → cleaner(清洗) → chunker → indexer |
-| `src/kbagent/retrieval/` | 读取链路：query_processor(意图/改写) → retriever → reranker(重排) → parent_expander(子母文档) |
-| `src/kbagent/generation/` | RAG 生成：llm(OpenAI 兼容) + pipeline(编号引用/多模态) |
-| `src/kbagent/governance/` | 治理：docs_meta / doc_events / consumer_cursor / scope / answer_log / audit_log / manifest |
+| `src/kbagent/retrieval/` | 读取链路：query_processor → retriever → 折叠/MMR → reranker → parent_expander |
+| `src/kbagent/generation/` | RAG 生成：llm + pipeline。闸 1 可答性、闸 2 引用契约、闸 3 声明校验（`KB_ANSWER_STRICT`） |
+| `src/kbagent/governance/` | 治理：docs_meta / doc_events / doc_relations / 时效 / 近似去重 / scope / answer_log / audit_log / manifest |
 | `src/kbagent/flags.py` | 运行时开关：runtime_flags + 热切换 |
 | `src/kbagent/storage/` | 存储抽象：后端中立 Filter、适配器工厂 |
 | `src/kbagent/vectorstore/` + `document_store/` | VectorStore / DocumentStore 协议；Chroma(切块) + SQLite(路径、哈希、摘要、切块定位；inline 正文) |

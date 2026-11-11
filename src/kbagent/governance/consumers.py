@@ -31,6 +31,8 @@ RESIDUAL_CONSUMERS = (
 _HIDE_EVENTS = frozenset({"hide", "pending_cleanup"})
 _UNHIDE_EVENTS = frozenset({"unhide"})
 _DELETE_EVENTS = frozenset({"delete"})
+# 确认 supersedes / merged_into 时同步发出。切块状态在确认当时已经写过，这里幂等再写一次。
+_STATUS_EVENTS = {"supersede": "superseded", "archive": "archived"}
 
 
 class VectorIndexConsumer:
@@ -62,6 +64,14 @@ class VectorIndexConsumer:
             return
         if kind in _DELETE_EVENTS:
             self.vector_store.delete(collection, where=eq("doc_id", doc_id))
+            return
+        if kind in _STATUS_EVENTS:
+            sync_chunk_governance(
+                self.vector_store,
+                collection,
+                doc_id,
+                status=_STATUS_EVENTS[kind],
+            )
             return
         logger.info("vector_index 忽略未知事件 %s", kind)
 

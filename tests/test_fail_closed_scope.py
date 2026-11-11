@@ -91,11 +91,11 @@ def test_missing_or_empty_scope_is_not_searched(tmp_path):
         [[1.0, 0.0]] * 5,
         ["可见", "缺范围", "空范围", "隐藏", "私有"],
         [
-            {"doc_id": "ok", "status": "active", "scope": "default"},
-            {"doc_id": "noscope", "status": "active"},
-            {"doc_id": "empty", "status": "active", "scope": ""},
-            {"doc_id": "hidden", "status": "hidden", "scope": "default"},
-            {"doc_id": "private", "status": "active", "scope": "private"},
+            {"doc_id": "ok", "status": "active", "scope": "default", "valid_until": 99991231},
+            {"doc_id": "noscope", "status": "active", "valid_until": 99991231},
+            {"doc_id": "empty", "status": "active", "scope": "", "valid_until": 99991231},
+            {"doc_id": "hidden", "status": "hidden", "scope": "default", "valid_until": 99991231},
+            {"doc_id": "private", "status": "active", "scope": "private", "valid_until": 99991231},
         ],
     )
     settings = Settings(storage_dir=tmp_path / "kb", embedding_model="unused")

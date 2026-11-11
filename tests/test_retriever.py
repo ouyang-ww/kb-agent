@@ -183,6 +183,7 @@ def test_media_in_retrieval_hit(kb):
             "title": "图",
             "scope": "default",
             "status": "active",
+            "valid_until": 99991231,
             "media_type": "image",
             "image_path": "/tmp/img.png",
             "page": 1,

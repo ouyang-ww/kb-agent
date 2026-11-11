@@ -15,6 +15,11 @@ class EvalItem:
     category: str = ""
     image_required: bool = False
     should_refuse: bool = False
+    # P2 评测集自带笔记和关系。空列表表示这条不需要临时入库。
+    documents: list[dict] = field(default_factory=list)
+    relations: list[dict] = field(default_factory=list)
+    missing_points: list[str] = field(default_factory=list)
+    expired_index: int | None = None
 
 
 def load_dataset(path: str | Path) -> list[EvalItem]:
@@ -34,6 +39,10 @@ def load_dataset(path: str | Path) -> list[EvalItem]:
                     category=obj.get("category", ""),
                     image_required=bool(obj.get("image_required", False)),
                     should_refuse=bool(obj.get("should_refuse", False)),
+                    documents=list(obj.get("documents") or []),
+                    relations=list(obj.get("relations") or []),
+                    missing_points=list(obj.get("missing_points") or []),
+                    expired_index=obj.get("expired_index"),
                 )
             )
     return items

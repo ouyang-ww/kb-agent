@@ -12,6 +12,8 @@ class QueryRequest(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=50)
     collection: str | None = None
     where: dict[str, Any] | None = None
+    include_expired: bool = False
+    as_of: str | None = None
 
 
 class IngestTextRequest(BaseModel):
@@ -39,6 +41,7 @@ class HitOut(BaseModel):
     score: float
     snippet: str = ""
     media: MediaOut | None = None
+    note: str = ""
 
 
 class SourceOut(BaseModel):
@@ -49,6 +52,7 @@ class SourceOut(BaseModel):
     snippet: str = ""
     section: str = ""
     media: MediaOut | None = None
+    note: str = ""
 
 
 class AskResponse(BaseModel):
