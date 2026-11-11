@@ -15,7 +15,8 @@ from .config import Settings
 from .document_store.base import DocumentStore
 from .embedding.local import SentenceTransformerEmbedder
 from .errors import KBError, NotFoundError
-from .governance.validity import chunk_valid_until, is_expired
+from .governance.validity import chunk_has_valid_until, chunk_valid_until, display_day, is_expired
+from .governance.scope import visibility_scopes
 from .flags import FeatureFlags
 from .generation.llm import LLMClient
 from .generation.pipeline import RAGPipeline
@@ -161,6 +162,7 @@ class KnowledgeBase:
             self._parent_expander,
             governance=self.governance,
         )
+        self.last_text_ingest: dict[str, Any] | None = None
         self._vector_consumer = VectorIndexConsumer(
             self._vector_store, self._doc_store, self.settings
         )
@@ -195,7 +197,7 @@ class KnowledgeBase:
         scope: str | None = None,
     ) -> str | None:
         with self._lock:
-            return self._indexer.ingest_text(
+            doc_id = self._indexer.ingest_text(
                 content,
                 title=title,
                 source_path=source_path,
@@ -205,6 +207,13 @@ class KnowledgeBase:
                 force=force,
                 scope=scope,
             )
+            partial = self._indexer._partial_index
+            self.last_text_ingest = {
+                "doc_id": doc_id,
+                "ok": bool(doc_id) and partial is None,
+                "partial": dict(partial) if partial else None,
+            }
+            return doc_id
 
     def delete_document(
         self,
@@ -489,25 +498,79 @@ class KnowledgeBase:
         rel_type: str,
         actor: str = "local",
     ) -> dict[str, Any]:
-        """确认后才生效。supersedes / merged_into 会把被取代的一边标成 superseded。"""
+        """确认后才生效。
+
+        ``supersedes`` / ``merged_into`` 只有在留下的那篇仍能被默认检索到时，
+        才把另一边标成 superseded。后继是 private/secret/hidden 或已过期时，
+        关系记为 confirmed，但旧文档保持 active，默认检索继续返回它。
+        """
         row = self.governance.get_relation(src_id, dst_id, rel_type)
         if row is None:
             raise NotFoundError(f"关系不存在: {src_id} -{rel_type}-> {dst_id}")
         if row["status"] == "rejected":
             raise KBError("已拒绝的关系不能直接确认，请重新提议")
         updated = self.governance.set_relation_status(src_id, dst_id, rel_type, "confirmed")
+        status_applied = False
         if rel_type == "supersedes":
-            self._apply_superseded(dst_id, src_id)
+            status_applied = self._supersede_if_successor_visible(src_id, dst_id)
         elif rel_type == "merged_into":
-            self._apply_superseded(src_id, dst_id)
+            status_applied = self._supersede_if_successor_visible(dst_id, src_id)
+        result = dict(updated or row)
+        if rel_type in {"supersedes", "merged_into"}:
+            result["status_applied"] = status_applied
         self.governance.record_audit(
             "relation.confirm",
             f"{src_id}->{dst_id}",
             actor=actor,
-            detail={"type": rel_type},
+            detail={"type": rel_type, "status_applied": status_applied},
         )
         self.drain_consumers()
-        return updated or row
+        return result
+
+    def _supersede_if_successor_visible(self, successor_id: str, older_id: str) -> bool:
+        """后继能被默认检索到才把旧文档标成 superseded。返回是否改了状态。"""
+        if not self._default_retrievable(successor_id):
+            logger.warning(
+                "确认取代 %s → %s，但新文档不在默认检索范围内，旧文档保持可检索",
+                successor_id,
+                older_id,
+            )
+            return False
+        self._apply_superseded(older_id, successor_id)
+        return True
+
+    def _default_retrievable(self, doc_id: str) -> bool:
+        """默认检索能否返回这篇：active、scope 在允许列表、valid_until 存在且未过期。"""
+        if not doc_id or not self._is_doc_visible(doc_id):
+            return False
+        try:
+            until, _verified = self._doc_dates(doc_id)
+        except Exception:
+            logger.warning("读取文档 %s 的时效失败，不把它当成可取代的后继", doc_id, exc_info=True)
+            return False
+        if is_expired(until):
+            return False
+        doc = self._doc_store.get(doc_id)
+        collection = (doc.collection if doc is not None else "") or self.settings.default_collection
+        try:
+            rows = self._vector_store.get(collection, where=eq("doc_id", doc_id))
+        except Exception:
+            logger.warning("读取文档 %s 的切块失败，不把它当成可取代的后继", doc_id, exc_info=True)
+            return False
+        allowed = set(visibility_scopes(self.settings.default_scope))
+        for row in rows:
+            meta = row.metadata or {}
+            if str(meta.get("status") or "") != ACTIVE_STATUS:
+                continue
+            scope = str(meta.get("scope") or "").strip()
+            if scope not in allowed:
+                continue
+            if not chunk_has_valid_until(meta.get("valid_until")):
+                continue
+            if is_expired(display_day(meta.get("valid_until"))):
+                continue
+            return True
+        return False
 
     def reject_relation(
         self,

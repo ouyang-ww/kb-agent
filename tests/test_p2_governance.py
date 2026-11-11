@@ -338,9 +338,11 @@ def test_supersedes_to_hidden_or_expired_keeps_the_searchable_hit(kb):
     hidden_new = kb.ingest_text(
         "新的秘密制度：食堂周一供应海鲜。", title="食堂秘密", scope="private"
     )
-    kb.governance.propose_relation(hidden_new, older, "supersedes", created_by="user")
-    kb.governance.set_relation_status(hidden_new, older, "supersedes", "confirmed")
-    assert kb.latest_doc(older) == hidden_new
+    kb.propose_relation(hidden_new, older, "supersedes", created_by="user")
+    confirmed = kb.confirm_relation(hidden_new, older, "supersedes")
+    assert confirmed["status"] == "confirmed"
+    assert confirmed["status_applied"] is False
+    assert kb.get_doc_meta(older).status == "active"
     hits = kb.search("食堂周一供应", top_k=5)
     found = {hit.doc_id for hit in hits}
     assert older in found
@@ -352,8 +354,10 @@ def test_supersedes_to_hidden_or_expired_keeps_the_searchable_hit(kb):
         title="差旅失效",
         metadata={"valid_until": "2019-01-01"},
     )
-    kb.governance.propose_relation(stale, current, "supersedes", created_by="user")
-    kb.governance.set_relation_status(stale, current, "supersedes", "confirmed")
+    kb.propose_relation(stale, current, "supersedes", created_by="user")
+    confirmed_expiry = kb.confirm_relation(stale, current, "supersedes")
+    assert confirmed_expiry["status_applied"] is False
+    assert kb.get_doc_meta(current).status == "active"
     later = kb.search("差旅每晚报销", top_k=5)
     later_ids = {hit.doc_id for hit in later}
     assert current in later_ids
@@ -397,8 +401,15 @@ def test_partial_chunk_index_is_not_a_full_success(kb, tmp_path):
     kept = "苹果是一种常见水果，味道清甜呢。"
     kb.ingest_text(kept, title="已有苹果")
     kb._indexer.chunker.chunk_size = max(len(kept), 8)
+    mixed = kept + "\n\n" + ("量子比特需要稀释制冷机才能稳定运行。" * 6)
+    text_id = kb.ingest_text(mixed, title="混合文本")
+    assert text_id
+    assert kb.last_text_ingest["doc_id"] == text_id
+    assert kb.last_text_ingest["ok"] is False
+    assert kb.last_text_ingest["partial"]["skipped_chunks"]
+
     path = tmp_path / "mixed.md"
-    path.write_text(kept + "\n\n" + ("量子比特需要稀释制冷机才能稳定运行。" * 6), encoding="utf-8")
+    path.write_text("标记" + ("后面。" * 80), encoding="utf-8")
     report = kb.ingest(path)
     assert report.partial
     assert report.ok is False
