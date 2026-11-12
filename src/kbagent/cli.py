@@ -1,4 +1,4 @@
-"""命令行入口：kb ingest / search / ask / list / delete / stats / serve / chat / eval / eval-build。"""
+"""命令行入口：kb ingest / search / ask / list / delete / open / mcp / stats / serve / chat / eval / eval-build。"""
 
 from __future__ import annotations
 
@@ -459,6 +459,43 @@ def study_answer(
     )
     typer.echo(f"参考答案: {result['expected']}")
     typer.echo(f"出处: {result['source_span']}")
+
+
+@app.command("open")
+def open_original_cmd(
+    doc_id: str = typer.Argument(..., help="文档 id。不接受路径"),
+):
+    """用 Obsidian 或系统默认应用打开已绑定的原文。
+
+    只用入库时保存的源路径。没有绑定、路径不可用，或文档对当前调用不可见时失败。
+    不读取正文，也不把原文写回应用库。
+    """
+    from .open_original import open_bound_original
+
+    kb = _kb()
+    try:
+        result = open_bound_original(kb, doc_id)
+    except (NotFoundError, KBError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    via = "Obsidian" if result.opener == "obsidian" else "系统默认应用"
+    typer.echo(f"已用{via}打开《{result.title}》（{result.doc_id}）")
+
+
+@app.command()
+def mcp():
+    """启动本机 MCP 服务（stdio，不监听端口）。
+
+    工具为 search、ask、open_original。study.enabled 打开后才有 study。
+    供本机客户端把 kb-agent 当作知识库组件，例如：kb mcp
+    """
+    from .mcp.server import serve_stdio
+
+    kb = _kb()
+    try:
+        serve_stdio(kb)
+    finally:
+        kb.close()
 
 
 # ================= 服务 =================
