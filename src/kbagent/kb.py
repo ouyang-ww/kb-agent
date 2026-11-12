@@ -14,7 +14,7 @@ from typing import Any
 from .config import Settings
 from .document_store.base import DocumentStore
 from .embedding.local import SentenceTransformerEmbedder
-from .errors import KBError, NotFoundError
+from .errors import KBError, NotFoundError, StudyDisabledError
 from .governance.validity import chunk_has_valid_until, chunk_valid_until, display_day, is_expired
 from .governance.scope import visibility_scopes
 from .flags import FeatureFlags
@@ -104,6 +104,9 @@ class KnowledgeBase:
                 "study.notifications": self.settings.study_notifications,
             },
         )
+        # 学习库只在 study.enabled 打开且真正调用时创建。关闭时核心路径不碰它。
+        self._study = None
+        self._study_api = None
         self._llm = llm or LLMClient(
             base_url=self.settings.llm_base_url,
             api_key=self.settings.llm_api_key,
@@ -400,6 +403,27 @@ class KnowledgeBase:
             "flag.set", name, actor=actor, detail={"enabled": value}
         )
         return value
+
+    def _open_study(self):
+        """打开学习库。模块关闭时失败，并且不创建 study.sqlite3。"""
+        if not self.flag("study.enabled"):
+            raise StudyDisabledError()
+        if self._study is None:
+            from .study.service import StudyService
+
+            self._study = StudyService(self.settings.study_db)
+        return self._study
+
+    @property
+    def study(self):
+        """学习切片入口：today / answer。关闭时抛错，不跑学习链路。"""
+        if not self.flag("study.enabled"):
+            raise StudyDisabledError()
+        if self._study_api is None:
+            from .study.api import StudyAPI
+
+            self._study_api = StudyAPI(self._open_study)
+        return self._study_api
 
     # ================= 观测 / 回填 =================
     def get_embedding_manifest(self) -> dict[str, Any] | None:
@@ -804,6 +828,10 @@ class KnowledgeBase:
         )
 
     def close(self) -> None:
+        study = self._study
+        self._study = None
+        if study is not None:
+            study.close()
         self._indexer.close()
         self.flags.close()
         self.governance.close()

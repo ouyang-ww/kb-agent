@@ -123,7 +123,7 @@ flowchart TB
 | `kb.py` | `KnowledgeBase` 门面（线程安全） | ✅ |
 | 治理 + 观测 | `docs_meta`、`doc_events`、`consumer_cursor`、scope、hide/unhide、`answer_log`、`audit_log`、`embedding_manifest` | ✅ 2026-10-30 |
 | `FeatureFlags` | `runtime_flags` + 热切换 | ✅ 2026-10-30 |
-| `study/` | 概念、题库、队列、掌握度、周报 | ⬜ L2/L3 |
+| `study/` | 硬编码 3 题、作答、SM-2 下次到期。概念 / 正式出题 / 周报未做 | ✅ 学习切片 |
 
 ---
 
@@ -133,7 +133,7 @@ flowchart TB
 | --- | --- | --- |
 | 源文件 | Markdown / PDF / 网页 | ✅ 唯一事实来源 |
 | `documents.sqlite3` | 路径、哈希、摘要、切块定位、`docs_meta`、`doc_relations`、`doc_events`、`consumer_cursor`、`answer_log`、`audit_log`、`embedding_manifest`、`runtime_pointer`、`runtime_flags`。绑定原件不存整篇正文。无外部原件的 `inline` 正文留在库内；源文件已丢失的旧副本标为 `orphaned_copy` | 索引可从源文件重建 |
-| `study.sqlite3` | `concepts`、`concept_edges`、`mentions`、`items`、`attempts`、`learner_state`、`reviews`、`outline_nodes` | 除 `attempts` / `learner_state` 外可 |
+| `study.sqlite3` | 学习切片：`items`、`attempts`、`reviews`、`schema_version`。概念、mentions、learner_state、周报还没有建表 | 作答和当前到期不能从文档重建 |
 | Chroma | 子 chunk 向量 + 元数据（`doc_id`、`scope`、`status`、`valid_until`、`manifest_id`） | ✅ |
 | `media/` | 图片等媒体文件 | ✅（从源文件重建） |
 | 派生文件 | 概念页、周报、参照系 | ✅ |
@@ -239,6 +239,7 @@ flowchart LR
 **边界**：
 
 - 默认关闭是库与组件集成的启动值；托盘默认开启学习模块。`study.enabled=false` 时学习链路不运行
+- 2026-11-12 已落地的只有硬编码切片：`kb study today` / `kb study answer`，数据在 `items` / `attempts` / `reviews`。上图里的概念抽取、正式出题、learner_state 和周报还没有。队列的今天是 Asia/Shanghai；P2 过期仍用 UTC。到期日前的作答不推进 SM-2
 - 开启不自动回填历史；关闭不删数据
 - 焦点感知只影响排序，不限制检索，也不是目标管理
 - 题目必须带出处；质量不达标进入隔离区

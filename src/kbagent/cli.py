@@ -11,7 +11,7 @@ import typer
 from typing import Optional
 
 from .config import Settings
-from .errors import KBError
+from .errors import KBError, NotFoundError, StudyDisabledError
 from .eval.dataset import EvalItem, load_dataset, save_dataset, validate
 from .eval.reports import compare_to_markdown, save_json, save_markdown, single_to_markdown
 from .eval.runner import Evaluator
@@ -395,6 +395,70 @@ def study_disable():
     kb = _kb()
     kb.set_flag("study.enabled", False)
     typer.echo("study.enabled=off")
+
+
+def _study_call(kb: KnowledgeBase, fn):
+    try:
+        return fn()
+    except StudyDisabledError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    except NotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+
+@study_app.command("today")
+def study_today(
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出，不含答案"),
+):
+    """列出今天到期的硬编码复习题。今天按 Asia/Shanghai，不是进程本地时区。"""
+    kb = _kb()
+    rows = _study_call(kb, lambda: kb.study.today())
+    if as_json:
+        typer.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    if not rows:
+        typer.echo("今天没有到期的题")
+        return
+    typer.echo(f"今日到期 {len(rows)} 题")
+    for row in rows:
+        typer.echo(f"[{row['id']}] {row['stem']}")
+        typer.echo(f"    来源: {row['source_label']}")
+        typer.echo(f"    到期: {row['next_due']}")
+
+
+@study_app.command("answer")
+def study_answer(
+    item_id: str = typer.Argument(..., help="题目 id，见 kb study today"),
+    response: str = typer.Option(..., "--response", help="作答内容"),
+    confidence: Optional[int] = typer.Option(
+        None, "--confidence", min=1, max=3, help="信心 1–3，只记在作答上，不参与调度"
+    ),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出判分和下次到期"),
+):
+    """记录一次作答。到期日及之后才改下次到期；提前作答只记账。"""
+    kb = _kb()
+    result = _study_call(
+        kb,
+        lambda: kb.study.answer(item_id, response, confidence=confidence),
+    )
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    typer.echo("正确" if result["correct"] >= 1 else "不正确")
+    if not result["schedule_updated"]:
+        typer.echo(result["schedule_note"])
+    typer.echo(
+        f"下次到期: {result['next_due']}"
+        f"（间隔 {int(result['interval_d'])} 天，ease {result['ease']:.2f}，"
+        f"reps {result['reps']}，lapses {result['lapses']}）"
+    )
+    typer.echo(f"参考答案: {result['expected']}")
+    typer.echo(f"出处: {result['source_span']}")
 
 
 # ================= 服务 =================
