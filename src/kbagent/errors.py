@@ -19,3 +19,16 @@ class LLMError(KBError):
 
 class ConfigError(KBError):
     """配置错误。"""
+
+
+class StudyDisabledError(KBError):
+    """学习模块关闭。核心摄入、检索、问答不依赖该模块。"""
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(
+            message
+            or (
+                "学习模块已关闭（study.enabled=off）。"
+                "摄入、检索和问答不受影响。开启：kb study enable"
+            )
+        )
