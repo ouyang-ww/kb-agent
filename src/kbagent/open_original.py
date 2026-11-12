@@ -222,22 +222,30 @@ def open_bound_original(
 ) -> OpenResult:
     """打开这篇文档入库时绑定的源文件。
 
-    隐藏、private、secret，以及没有绑定路径的文档都失败。
-    不读取文件内容，也不写回 ``documents.sqlite3``。
+    必须和默认检索同一道门：``_default_retrievable`` 为假（隐藏、private、
+    secret、已过期，或不在默认 scope 允许列表里）就失败。没有 include-expired
+    之类的旁路。不读取文件内容，也不写回 ``documents.sqlite3``。
     """
     key = (doc_id or "").strip()
     if not key:
         raise NotFoundError(NOT_VISIBLE)
     doc = kb.get_document(key, include_hidden=False)
-    if doc is None:
+    # get_document 只排除隐藏 / private / secret。过期和允许列表之外的 scope
+    # 仍能被读到，但默认 search / ask 不会返回，这里同样不能打开。
+    if doc is None or not kb._default_retrievable(key):
         raise NotFoundError(NOT_VISIBLE)
     if doc.source_kind != SOURCE_BOUND:
         raise KBError(NOT_BOUND)
     absolute = _usable_file((doc.source_path or "").strip())
     opener = launch or SystemOpenLaunch()
     if opener.obsidian_installed():
-        opener.open_obsidian(absolute)
-        which = "obsidian"
+        try:
+            opener.open_obsidian(absolute)
+            which = "obsidian"
+        except KBError:
+            # Obsidian 装了但没能启动时，改用系统默认应用。错误信息里不带路径。
+            opener.open_system(absolute)
+            which = "system"
     else:
         opener.open_system(absolute)
         which = "system"

@@ -467,7 +467,8 @@ def open_original_cmd(
 ):
     """用 Obsidian 或系统默认应用打开已绑定的原文。
 
-    只用入库时保存的源路径。没有绑定、路径不可用，或文档对当前调用不可见时失败。
+    只打开默认检索也能返回的文档。已过期，或不在默认 scope 允许列表里的文档会失败。
+    没有 --include-expired 旁路。只用入库时保存的源路径。
     不读取正文，也不把原文写回应用库。
     """
     from .open_original import open_bound_original

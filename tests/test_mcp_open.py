@@ -123,6 +123,26 @@ def _ingest(kb, path: Path, **kwargs) -> str:
     return report.added[0]
 
 
+def _seed_visible_chunk(kb, doc_id: str) -> None:
+    """给直接写入的文档补一条默认可检索的切块，后面的路径检查才走得到。"""
+    from helpers import FakeEmbedder
+
+    kb._vector_store.add(
+        kb.settings.default_collection,
+        ids=[f"{doc_id}#visible"],
+        embeddings=[FakeEmbedder().embed_query(doc_id)],
+        documents=["visible-gate"],
+        metadatas=[
+            {
+                "doc_id": doc_id,
+                "status": "active",
+                "scope": "default",
+                "valid_until": 99991231,
+            }
+        ],
+    )
+
+
 # ---------- 打开原文：命令选择与探测，不启动 GUI ----------
 
 
@@ -311,6 +331,8 @@ def test_open_fail_closed_for_hidden_unbound_and_missing(kb, tmp_path):
             source_kind=SOURCE_BOUND,
         )
     )
+    _seed_visible_chunk(kb, "dir-bound")
+    assert kb._default_retrievable("dir-bound") is True
     launch = RecordingLaunch()
     with pytest.raises(KBError, match=MISSING_FILE) as dir_exc:
         open_bound_original(kb, "dir-bound", launch=launch)
@@ -329,6 +351,7 @@ def test_open_fail_closed_for_hidden_unbound_and_missing(kb, tmp_path):
             source_kind=SOURCE_DIVERGED,
         )
     )
+    _seed_visible_chunk(kb, "drifted")
     with pytest.raises(KBError, match=NOT_BOUND):
         open_bound_original(kb, "drifted", launch=RecordingLaunch())
     assert _row(kb, "drifted")["full_text"] == ""
@@ -342,6 +365,7 @@ def test_open_fail_closed_for_hidden_unbound_and_missing(kb, tmp_path):
             source_kind=SOURCE_BOUND,
         )
     )
+    _seed_visible_chunk(kb, "no-path")
     with pytest.raises(KBError, match=NO_PATH) as no_path:
         open_bound_original(kb, "no-path", launch=RecordingLaunch())
     assert "不应被写回或返回" not in str(no_path.value)
@@ -380,6 +404,96 @@ def test_open_does_not_write_original_back_into_the_database(kb, tmp_path):
 
 
 # ---------- MCP ----------
+
+
+def test_open_rejects_expired_and_scopes_outside_the_default_allowlist(kb, tmp_path):
+    expired_note = tmp_path / "expired-bound.md"
+    expired_note.write_text(("过期正文不应出现。" * 30) + _TAIL, encoding="utf-8")
+    expired_id = _ingest(kb, expired_note)
+    meta = kb.get_doc_meta(expired_id)
+    assert meta is not None
+    meta.valid_until = "2020-01-01"
+    kb.governance.upsert_meta(meta)
+    assert kb.get_document(expired_id) is not None
+    assert kb._default_retrievable(expired_id) is False
+    assert all(hit.doc_id != expired_id for hit in kb.search("过期正文不应出现", top_k=5))
+    launch = RecordingLaunch()
+    with pytest.raises(KBError, match=NOT_VISIBLE) as expired_exc:
+        open_bound_original(kb, expired_id, launch=launch)
+    assert launch.calls == []
+    expired_text = str(expired_exc.value)
+    assert str(expired_note) not in expired_text
+    assert expired_note.name not in expired_text
+    assert "过期正文不应出现" not in expired_text
+    assert _TAIL not in expired_text
+    assert _row(kb, expired_id)["full_text"] == ""
+    assert _TAIL.encode() not in _sqlite_bytes(kb)
+
+    server = McpServer(kb, launch=launch)
+    mcp_error = _err(_call(server, "open_original", {"doc_id": expired_id}))
+    assert NOT_VISIBLE in mcp_error
+    assert str(expired_note) not in mcp_error
+    assert "过期正文不应出现" not in mcp_error
+    bypass = _err(
+        _call(server, "open_original", {"doc_id": expired_id, "include_expired": True})
+    )
+    assert "include_expired" in bypass
+    assert launch.calls == []
+
+    archive_note = tmp_path / "archive-bound.md"
+    archive_body = "档案范围的绑定原文不在默认允许列表。"
+    archive_note.write_text(archive_body, encoding="utf-8")
+    archive_id = _ingest(kb, archive_note, scope="archive")
+    assert kb.get_document(archive_id) is not None
+    assert kb.get_document(archive_id).scope == "archive"
+    assert kb._default_retrievable(archive_id) is False
+    assert all(hit.doc_id != archive_id for hit in kb.search(archive_body, top_k=5))
+    with pytest.raises(KBError, match=NOT_VISIBLE) as archive_exc:
+        open_bound_original(kb, archive_id, launch=launch)
+    assert launch.calls == []
+    assert str(archive_note) not in str(archive_exc.value)
+    assert archive_body not in str(archive_exc.value)
+    assert _row(kb, archive_id)["full_text"] == ""
+
+    work_note = tmp_path / "work-bound.md"
+    work_note.write_text("工作范围仍在默认允许列表里。", encoding="utf-8")
+    work_id = _ingest(kb, work_note, scope="work")
+    assert kb._default_retrievable(work_id) is True
+    opened = open_bound_original(kb, work_id, launch=RecordingLaunch(True))
+    assert opened.doc_id == work_id
+    assert opened.opener == "obsidian"
+
+
+def test_obsidian_launch_failure_falls_back_to_the_system_app(kb, tmp_path):
+    note = tmp_path / "obsidian-fails.md"
+    note.write_text("Obsidian 打不开时改用系统应用。", encoding="utf-8")
+    doc_id = _ingest(kb, note)
+
+    class ObsidianFails(RecordingLaunch):
+        def open_obsidian(self, path: Path) -> None:
+            super().open_obsidian(path)
+            raise KBError(OPEN_FAILED)
+
+    launch = ObsidianFails()
+    opened = open_bound_original(kb, doc_id, launch=launch)
+    assert opened.opener == "system"
+    assert launch.calls == [
+        ("obsidian", note.resolve()),
+        ("system", note.resolve()),
+    ]
+    assert _row(kb, doc_id)["full_text"] == ""
+
+    class BothFail(RecordingLaunch):
+        def open_obsidian(self, path: Path) -> None:
+            raise KBError(OPEN_FAILED)
+
+        def open_system(self, path: Path) -> None:
+            raise KBError(OPEN_FAILED)
+
+    with pytest.raises(KBError, match=OPEN_FAILED) as failed:
+        open_bound_original(kb, doc_id, launch=BothFail())
+    assert str(note) not in str(failed.value)
+    assert note.name not in str(failed.value)
 
 
 def test_redact_external_reuses_absolute_path_rule():
@@ -434,6 +548,21 @@ def test_mcp_lists_search_ask_and_open_until_study_is_enabled(kb):
     today_text = json.dumps(today, ensure_ascii=False)
     assert "Retrieval-Augmented Generation" not in today_text
     assert all("answer" not in row for row in today["items"])
+    secret_study = "/tmp/abs/secret-study.md"
+    kb.study.today = lambda on=None: [
+        {
+            "id": "x",
+            "stem": "题",
+            "source_label": "examples/sample_notes/01.md",
+            "source_path": secret_study,
+            "image_path": "/tmp/abs/secret.png",
+        }
+    ]
+    redacted = _ok(_call(server, "study", {"action": "today"}))
+    assert redacted["items"][0]["source_path"] == ""
+    assert redacted["items"][0]["image_path"] == ""
+    assert redacted["items"][0]["source_label"] == "examples/sample_notes/01.md"
+    assert secret_study not in json.dumps(redacted, ensure_ascii=False)
     answered = _ok(
         _call(
             server,
@@ -583,6 +712,7 @@ def test_mcp_stdio_handshake_and_unknown_method(kb):
     lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
     assert len(lines) == 2
     assert lines[0]["result"]["protocolVersion"] == "2025-03-26"
+    assert lines[0]["result"]["capabilities"]["tools"]["listChanged"] is True
     assert lines[0]["result"]["serverInfo"]["name"] == "kbagent"
     names = [tool["name"] for tool in lines[1]["result"]["tools"]]
     assert names == ["search", "ask", "open_original"]
@@ -608,6 +738,50 @@ def test_mcp_stdio_handshake_and_unknown_method(kb):
     parsed = json.loads(dispatch_line(server, "{"))
     assert parsed["error"]["code"] == -32700
     assert dispatch_line(server, json.dumps(note)) is None
+
+
+def test_mcp_notifies_when_study_tools_change(kb):
+    init = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {}},
+    }
+    listed = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+
+    class _Lines:
+        def __init__(self) -> None:
+            self.step = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> str:
+            self.step += 1
+            if self.step == 1:
+                return json.dumps(init) + "\n"
+            if self.step == 2:
+                kb.set_flag("study.enabled", True)
+                return json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+            if self.step == 3:
+                return json.dumps(listed) + "\n"
+            raise StopIteration
+
+    stdout = io.StringIO()
+    serve_stdio(kb, stdin=_Lines(), stdout=stdout, launch=RecordingLaunch())
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+    assert [line.get("method") for line in lines] == [
+        None,
+        "notifications/tools/list_changed",
+        None,
+    ]
+    assert lines[1] == {
+        "jsonrpc": "2.0",
+        "method": "notifications/tools/list_changed",
+    }
+    names = [tool["name"] for tool in lines[2]["result"]["tools"]]
+    assert names == ["search", "ask", "open_original", "study"]
+    assert str(kb.settings.storage_dir) not in stdout.getvalue()
 
 
 def test_cli_open_and_mcp_commands(kb, tmp_path, monkeypatch):

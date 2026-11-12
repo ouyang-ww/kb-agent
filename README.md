@@ -174,7 +174,7 @@ kb.delete_document(doc_id); kb.stats()
 }
 ```
 
-工具是 `search`、`ask`、`open_original`。`study.enabled` 打开后才有 `study`（`action` 为 `today` 或 `answer`）。`open_original` 只接受 `doc_id`，由本机用已绑定路径打开原文，优先 Obsidian，否则系统默认应用。响应默认去掉绝对 `source_path` / `image_path`（`KB_EXPOSE_SOURCE_PATHS` 默认关）。没有读文件、列目录或执行命令的工具。
+工具是 `search`、`ask`、`open_original`。`study.enabled` 打开后才有 `study`（`action` 为 `today` 或 `answer`），并通知客户端刷新工具列表。`open_original` 只接受 `doc_id`，由本机用已绑定路径打开原文；文档必须是默认检索能返回的（过期或不在允许 scope 里的打不开，也没有 include-expired 旁路）。优先 Obsidian，启动失败再用系统默认应用。响应默认去掉绝对 `source_path` / `image_path`（`KB_EXPOSE_SOURCE_PATHS` 默认关）。没有读文件、列目录或执行命令的工具。
 
 命令行打开同一篇原文：`.venv/bin/kb open <doc_id>`。
 
@@ -183,7 +183,7 @@ kb.delete_document(doc_id); kb.stats()
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 254 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文
+.venv/bin/python -m pytest -q          # 257 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文
 ```
 
 ## 目录结构

@@ -39,4 +39,4 @@ v0.1.0 把父文档全文放进 SQLite，检索时用这份副本做父文档扩
 - 已入库父全文用 `kb governance migrate-parents`（REST：`POST /v1/governance/migrate-parents`，admin Key）。源文件哈希与已入库哈希一致才删除库内全文并标为 `bound`；不一致则保留正文并标为 `diverged`（文件还在，需要重新入库）。源文件不在则标为 `orphaned_copy`。切块定位对齐已有向量，不重新切块。
 - 父文档扩写回读前核对 `content_hash`。不一致或无法核对时退回切块文本，不把漂移后的文件送进提示词。
 - 检索质量护栏（Recall / Accuracy / Faithfulness）继续有效。父全文改回读是有意变更，不把它当成 L1 回归失败。
-- 对外 REST / MCP 默认不附带绝对路径（`source_path` / `image_path` 置空）。相对路径仍返回。需要本机调试时设 `KB_EXPOSE_SOURCE_PATHS=true`。打开原文是 `kb open <doc_id>` 或 MCP 工具 `open_original`：本机服务用已保存的绑定路径调用 Obsidian，没有安装时用系统默认应用。调用方不传路径，响应也不附带绝对路径。未绑定、路径不可用或当前范围不可见时直接失败，不把正文写回应用库。
+- 对外 REST / MCP 默认不附带绝对路径（`source_path` / `image_path` 置空）。相对路径仍返回。需要本机调试时设 `KB_EXPOSE_SOURCE_PATHS=true`。打开原文是 `kb open <doc_id>` 或 MCP 工具 `open_original`：只打开默认检索也能返回的文档（含过期与 scope 允许列表，没有 include-expired 旁路）。本机服务用已保存的绑定路径调用 Obsidian，没有安装或启动失败时用系统默认应用。调用方不传路径，响应也不附带绝对路径。未绑定、路径不可用或当前范围不可见时直接失败，不把正文写回应用库。

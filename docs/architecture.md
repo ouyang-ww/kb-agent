@@ -124,7 +124,7 @@ flowchart TB
 | 治理 + 观测 | `docs_meta`、`doc_events`、`consumer_cursor`、scope、hide/unhide、`answer_log`、`audit_log`、`embedding_manifest` | ✅ 2026-10-30 |
 | `FeatureFlags` | `runtime_flags` + 热切换 | ✅ 2026-10-30 |
 | `study/` | 硬编码 3 题、作答、SM-2 下次到期。概念 / 正式出题 / 周报未做 | ✅ 学习切片 |
-| `mcp/` + `open_original.py` | 本机 MCP（stdio：search / ask / open_original；study 仅在模块开启时）。打开原文优先 Obsidian，否则系统默认应用 | ✅ 2026-11-12 |
+| `mcp/` + `open_original.py` | 本机 MCP（stdio：search / ask / open_original；study 仅在模块开启时）。打开原文与默认检索同一道门，优先 Obsidian，失败再用系统默认应用 | ✅ 2026-11-12 |
 
 ---
 
@@ -321,7 +321,7 @@ flowchart LR
 - CLI、REST、MCP 保留。REST 默认监听 `127.0.0.1`。MCP 是 `kb mcp` 的本机 stdio，不另开端口
 - 作为组件时，只读与管理 Key 分离；`where` / `collection` 白名单。MCP 的 search / ask 不接受可见性旁路
 - 同步通道按多设备预留：默关的加密远程同步，以及同 Wi-Fi 配对同步。MVP 不做移动端。同步通道本身尚未实现
-- 不提供通用工具调用，不需要沙箱。打开原文是固定的本机动作，只用已绑定路径
+- 不提供通用工具调用，不需要沙箱。打开原文是固定的本机动作，只用已绑定路径，并且只打开默认检索能返回的文档。没有 include-expired 旁路
 
 ---
 

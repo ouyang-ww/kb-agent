@@ -99,8 +99,9 @@ def _ask_tool() -> dict:
 def _open_tool() -> dict:
     return _tool(
         "open_original",
-        "用本机已保存的绑定路径打开原文。优先 Obsidian，否则系统默认应用。"
-        "只接受 doc_id，不接受路径。隐藏或未绑定的文档会失败，且不返回路径。",
+        "用本机已保存的绑定路径打开原文。优先 Obsidian，启动失败再用系统默认应用。"
+        "只接受 doc_id。默认检索不会返回的文档（隐藏、过期、或不在允许的 scope 里）"
+        "会失败，且不返回路径。没有 include-expired 旁路。",
         {"doc_id": {"type": "string", "description": "文档 id"}},
         ["doc_id"],
     )
@@ -211,9 +212,24 @@ class McpServer:
     def __init__(self, kb, *, launch: OriginalLaunch | None = None) -> None:
         self.kb = kb
         self.launch = launch
+        # None 表示还没向客户端宣布过工具列表。之后 study 开关变化才发通知。
+        self._study_announced: bool | None = None
 
     def _expose(self) -> bool:
         return bool(self.kb.settings.expose_source_paths)
+
+    def pop_tools_changed(self) -> dict | None:
+        """study 开关变化时返回 MCP 的 tools/list_changed 通知。
+
+        第一次调用只记住当前状态，不发通知。stdio 循环在每条请求前调用，
+        这样客户端不用重连就能刷新工具列表。
+        """
+        enabled = bool(self.kb.flag("study.enabled"))
+        previous = self._study_announced
+        self._study_announced = enabled
+        if previous is None or previous == enabled:
+            return None
+        return {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 
     def tool_definitions(self) -> list[dict]:
         tools = [_search_tool(), _ask_tool(), _open_tool()]
@@ -305,17 +321,19 @@ class McpServer:
             raise KBError("study.action 只能是 today 或 answer")
         # 关闭时门面会抛错，并且不会创建 study.sqlite3。
         if action == "today":
-            return {"items": self.kb.study.today()}
-        item_id = _required_text(data, "item_id")
-        response = data.get("response")
-        if not isinstance(response, str):
-            raise KBError("response 必须是字符串")
-        confidence = data.get("confidence")
-        if confidence is not None and (
-            isinstance(confidence, bool) or confidence not in (1, 2, 3)
-        ):
-            raise KBError("confidence 只能是 1、2 或 3")
-        return self.kb.study.answer(item_id, response, confidence=confidence)
+            payload: Any = {"items": self.kb.study.today()}
+        else:
+            item_id = _required_text(data, "item_id")
+            response = data.get("response")
+            if not isinstance(response, str):
+                raise KBError("response 必须是字符串")
+            confidence = data.get("confidence")
+            if confidence is not None and (
+                isinstance(confidence, bool) or confidence not in (1, 2, 3)
+            ):
+                raise KBError("confidence 只能是 1、2 或 3")
+            payload = self.kb.study.answer(item_id, response, confidence=confidence)
+        return redact_external(payload, self._expose())
 
     def handle(self, message: dict) -> dict | None:
         """处理一条 JSON-RPC。通知返回 None，调用方不要写响应。"""
@@ -383,7 +401,7 @@ class McpServer:
             version = DEFAULT_PROTOCOL
         return {
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": True}},
             "serverInfo": {"name": SERVER_NAME, "version": __version__},
             "instructions": _INSTRUCTIONS,
         }
@@ -464,6 +482,12 @@ def serve_stdio(
             pass
     server = McpServer(kb, launch=launch)
     for line in inp:
+        if not line.strip():
+            continue
+        changed = server.pop_tools_changed()
+        if changed is not None:
+            out.write(_dump(changed) + "\n")
+            out.flush()
         response = dispatch_line(server, line)
         if response is None:
             continue
