@@ -14,8 +14,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from ..errors import KBError, NotFoundError
+from .calendar import shanghai_today
 from .cards import HARDCODED_CARDS, PROMPT_VERSION, is_correct
 from .scheduler import DEFAULT_EASE, ReviewState, grade_for_outcome, schedule
+
+# 同一天再答，或到期日之前作答：尝试要留下，SM-2 不动。
+SCHEDULE_HELD = "未到到期日，本次作答已记录，下次到期不变"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -72,8 +76,9 @@ def _now() -> str:
 
 
 def resolve_day(on: date | None) -> date:
+    """缺省日期是 Asia/Shanghai 的今天，不是进程本地日，也不是 P2 的 UTC 日。"""
     if on is None:
-        return date.today()
+        return shanghai_today()
     if type(on) is not date:
         raise KBError("on 必须是 datetime.date")
     return on
@@ -171,7 +176,7 @@ class StudyStore:
             row = self._conn.execute(
                 """
                 SELECT i.id, i.answer, i.accept_json, i.source_label, i.source_span,
-                       i.status, r.ease, r.interval_d, r.reps, r.lapses
+                       i.status, r.ease, r.interval_d, r.reps, r.lapses, r.next_due
                 FROM items i
                 JOIN reviews r ON r.item_id = i.id
                 WHERE i.id = ?
@@ -182,17 +187,34 @@ class StudyStore:
                 raise NotFoundError(f"题目不存在: {key}")
             accept = tuple(json.loads(row["accept_json"] or "[]"))
             correct = 1.0 if is_correct(row["answer"], accept, response) else 0.0
-            graded = schedule(
-                ReviewState(
-                    ease=float(row["ease"]),
-                    interval_d=float(row["interval_d"]),
-                    reps=int(row["reps"]),
-                    lapses=int(row["lapses"]),
-                ),
-                grade_for_outcome(correct),
-                on,
-            )
-            next_due = graded.next_due.isoformat()
+            current_due = date.fromisoformat(row["next_due"])
+            # 到期日之前（含同一天已经推过后）只记账。reps / lapses 也保持不动。
+            if current_due > on:
+                schedule_updated = False
+                grade = grade_for_outcome(correct)
+                next_due = row["next_due"]
+                ease = float(row["ease"])
+                interval_d = float(row["interval_d"])
+                reps = int(row["reps"])
+                lapses = int(row["lapses"])
+            else:
+                graded = schedule(
+                    ReviewState(
+                        ease=float(row["ease"]),
+                        interval_d=float(row["interval_d"]),
+                        reps=int(row["reps"]),
+                        lapses=int(row["lapses"]),
+                    ),
+                    grade_for_outcome(correct),
+                    on,
+                )
+                schedule_updated = True
+                grade = graded.grade
+                next_due = graded.next_due.isoformat()
+                ease = graded.ease
+                interval_d = graded.interval_d
+                reps = graded.reps
+                lapses = graded.lapses
             stamp = _now()
             try:
                 self._conn.execute(
@@ -211,22 +233,15 @@ class StudyStore:
                         next_due,
                     ),
                 )
-                self._conn.execute(
-                    """
-                    UPDATE reviews
-                    SET ease=?, interval_d=?, reps=?, lapses=?, next_due=?, updated_at=?
-                    WHERE item_id=?
-                    """,
-                    (
-                        graded.ease,
-                        graded.interval_d,
-                        graded.reps,
-                        graded.lapses,
-                        next_due,
-                        stamp,
-                        key,
-                    ),
-                )
+                if schedule_updated:
+                    self._conn.execute(
+                        """
+                        UPDATE reviews
+                        SET ease=?, interval_d=?, reps=?, lapses=?, next_due=?, updated_at=?
+                        WHERE item_id=?
+                        """,
+                        (ease, interval_d, reps, lapses, next_due, stamp, key),
+                    )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
@@ -234,15 +249,17 @@ class StudyStore:
         return {
             "item_id": key,
             "correct": correct,
-            "grade": graded.grade,
+            "grade": grade,
             "grader": "exact",
             "response": response,
             "confidence": confidence,
+            "schedule_updated": schedule_updated,
+            "schedule_note": "" if schedule_updated else SCHEDULE_HELD,
             "next_due": next_due,
-            "interval_d": graded.interval_d,
-            "ease": graded.ease,
-            "reps": graded.reps,
-            "lapses": graded.lapses,
+            "interval_d": interval_d,
+            "ease": ease,
+            "reps": reps,
+            "lapses": lapses,
             "source_label": row["source_label"],
             "source_span": row["source_span"],
             "expected": row["answer"],

@@ -234,7 +234,7 @@ doc_events → consumers（向量库 / mentions / items / reports / cache / queu
 排在 status 第 3 条，也就是治理 P2 之后。用硬编码的 3 道题跑通 `today → answer → 下次到期`，自己真实使用 3 天。不抽取概念。  
 **不达标就回到交互设计，不进入 L2，也不提前做 S1 正式出题。**
 
-2026-11-12 代码闭环已落地：3 道硬编码题可以 `today → answer → 下次到期`。连续使用 3 天的 Go/No-Go 还没做，因此还不进入 L2，也不做 S1。
+2026-11-12 代码闭环已落地：3 道硬编码题可以 `today → answer → 下次到期`。学习队列的今天是 Asia/Shanghai，P2 时效仍用 UTC。到期日前的作答只记账，不推进 SM-2。连续使用 3 天的 Go/No-Go 还没做，因此还不进入 L2，也不做 S1。
 
 ### 6.1 阶段表
 

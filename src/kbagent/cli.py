@@ -415,7 +415,7 @@ def _study_call(kb: KnowledgeBase, fn):
 def study_today(
     as_json: bool = typer.Option(False, "--json", help="JSON 输出，不含答案"),
 ):
-    """列出今天到期的硬编码复习题。模块关闭时失败，不影响检索。"""
+    """列出今天到期的硬编码复习题。今天按 Asia/Shanghai，不是进程本地时区。"""
     kb = _kb()
     rows = _study_call(kb, lambda: kb.study.today())
     if as_json:
@@ -436,11 +436,11 @@ def study_answer(
     item_id: str = typer.Argument(..., help="题目 id，见 kb study today"),
     response: str = typer.Option(..., "--response", help="作答内容"),
     confidence: Optional[int] = typer.Option(
-        None, "--confidence", min=1, max=3, help="信心 1–3，只记录，不改变到期"
+        None, "--confidence", min=1, max=3, help="信心 1–3，只记在作答上，不参与调度"
     ),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出判分和下次到期"),
 ):
-    """记录一次作答，并写入下次到期。判分是精确匹配，不调用模型。"""
+    """记录一次作答。到期日及之后才改下次到期；提前作答只记账。"""
     kb = _kb()
     result = _study_call(
         kb,
@@ -450,6 +450,8 @@ def study_answer(
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         return
     typer.echo("正确" if result["correct"] >= 1 else "不正确")
+    if not result["schedule_updated"]:
+        typer.echo(result["schedule_note"])
     typer.echo(
         f"下次到期: {result['next_due']}"
         f"（间隔 {int(result['interval_d'])} 天，ease {result['ease']:.2f}，"

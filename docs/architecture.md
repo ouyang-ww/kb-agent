@@ -239,7 +239,7 @@ flowchart LR
 **边界**：
 
 - 默认关闭是库与组件集成的启动值；托盘默认开启学习模块。`study.enabled=false` 时学习链路不运行
-- 2026-11-12 已落地的只有硬编码切片：`kb study today` / `kb study answer`，数据在 `items` / `attempts` / `reviews`。上图里的概念抽取、正式出题、learner_state 和周报还没有
+- 2026-11-12 已落地的只有硬编码切片：`kb study today` / `kb study answer`，数据在 `items` / `attempts` / `reviews`。上图里的概念抽取、正式出题、learner_state 和周报还没有。队列的今天是 Asia/Shanghai；P2 过期仍用 UTC。到期日前的作答不推进 SM-2
 - 开启不自动回填历史；关闭不删数据
 - 焦点感知只影响排序，不限制检索，也不是目标管理
 - 题目必须带出处；质量不达标进入隔离区

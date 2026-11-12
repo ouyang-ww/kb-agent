@@ -53,7 +53,8 @@
 ### 学习切片（2026-11-12）
 
 - **闭环**：`kb study today` 列出今天到期的 3 道硬编码题；`kb study answer <id> --response "..."` 做精确判分，并把下次到期写入 `study.sqlite3` 的 `reviews`。题目来自 `examples/sample_notes/01_rag基础.md`，不是模型生成
-- **调度**：SM-2 简化版。第一次答对间隔 1 天，第二次 3 天，之后 `round(间隔 × ease)`；答错间隔回到 1 天，ease 减 0.2，重复次数清零
+- **调度**：SM-2 简化版。第一次答对间隔 1 天，第二次 3 天，之后 `round(间隔 × ease)`；答错间隔回到 1 天，ease 减 0.2，重复次数清零。到期日之前再答（含同一天再答）仍写入 `attempts`，但不改 `next_due`、间隔、ease、reps、lapses，返回 `schedule_updated=false`
+- **日历**：学习队列的「今天」固定 Asia/Shanghai，不看进程本地时区。P2 的 `valid_until` 仍用 UTC 日，这刀没有改那只钟。上海 0:00–8:00 时，UTC 日还是前一天
 - **开关**：只看 `study.enabled`。库与组件默认关。`kb study enable` 不回填历史，第一次 `today` / `answer` 才种下这 3 题。关闭不删库，核心摄入 / 检索 / 问答不打开这张库
 - **没有做**：概念抽取、mentions、learner_state、概念页、周报、S1 正式出题、题库去重、托盘 / 小窗。`study.queue` 等子开关仍只是注册项，这刀不读它们。连续使用 3 天的 Go/No-Go 还没做，所以还不进入 L2
 
@@ -67,7 +68,7 @@
 
 ## 2. 当前验证
 
-- 全量测试：**236 passed**（2026-11-12，含学习切片）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即本分支起点 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
+- 全量测试：**240 passed**（2026-11-12，含学习切片）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即本分支起点 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
 - `STRUCTURE.md` 已补上源文件回读与父全文迁移相关文件
 - 测试历史：本地 `test_history.log`（已 gitignore，不随仓库发布）
 
@@ -88,7 +89,7 @@
 - 同路径再入库或替换时，如果调用方没有显式传入新的 scope，会保留原来的 scope 和 hidden / private 状态，不会洗成默认可检索。显式传入 scope 才会按新范围写入并把状态放回 active
 - 多个进程共用一个 Chroma 目录时，另一个进程的 `kb repair` 或向量改写会让本进程已经加载的内存索引过期：`get` 能看到新记录，`query` 仍可能返回已删除的 id，默认检索因此变空。下一次检索会对比目录签名并重新打开客户端。跨进程改写之后，同一进程里随后的检索可能因为 mtime/fingerprint 继续漂移而每次都重新打开；结果仍然正确，本轮不处理。`kb repair` 的结果里有 `notice`，命令行也会打到 stderr：若检索仍然为空，重启那个进程。Chroma 不保证多个进程同时写入同一目录是安全的
 - `answer_log` / `audit_log` 暂无保留期与轮转策略
-- 学习切片只做了 3 道硬编码题的 today → answer → 下次到期。概念、正式题库、每日队列策略、周报、托盘都还没有。按 PLAN §0.1，它仍是独立模块：托盘默认开，库与组件默认关。`study.enabled=false` 时核心不创建、也不读取 `study.sqlite3`
+- 学习切片只做了 3 道硬编码题的 today → answer → 下次到期。概念、正式题库、每日队列策略、周报、托盘都还没有。按 PLAN §0.1，它仍是独立模块：托盘默认开，库与组件默认关。`study.enabled=false` 时核心不创建、也不读取 `study.sqlite3`。学习「今天」是 Asia/Shanghai；P2 过期比较仍是 UTC。未到期的作答只记账，不推进下次到期
 - 父文档扩写会整篇回读并重新清洗源文件；`KB_MAX_PARENT_CHARS` 只限制返回窗口
 - 绑定文件在入库后被修改时，扩写核对 `content_hash`，不一致则退回切块文本，不把漂移后的文件送进提示词；文件缺失同样退回切块文本。切块与源文件重新对齐要重新入库
 - 对外 REST 默认去掉绝对 `source_path` / `image_path`（`KB_EXPOSE_SOURCE_PATHS` 默认关）。`GET /v1/documents/{doc_id}` 默认不含全文，`include_text=true` 才返回 inline 正文。用 Obsidian 或系统应用打开原文仍留在 §5 第 4 条
@@ -117,7 +118,7 @@
 近期顺序以本节为准。治理阶段的 P1、P2 与 [知识治理](./knowledge-governance.md) 同名。学习阶段叫 L2、S1–S4，见 [PLAN §6](../PLAN.md)。
 
 1. **P2 已落地**（2026-11-11）：闸 3 / `KB_ANSWER_STRICT`、过期与冲突、近似去重、近邻陷阱集 / 冲突集 / 过期集。题库去重仍等学习模块。P1 的闸门、引用契约、库外拒答集和 fail-closed scope 没有在这里重做。mentions / items / reports 仍等学习模块
-2. **学习切片已落地**（2026-11-12）：3 道硬编码题，`kb study today` → `kb study answer` → 下次到期。不抽取概念，不是 S1，不是 L2。托盘或小窗没有做。正式闪卡生成仍是 S1，排在第 5 条 L2 之后。连续使用 3 天的 Go/No-Go 还没做
+2. **学习切片已落地**（2026-11-12）：3 道硬编码题，`kb study today` → `kb study answer` → 下次到期。今天按 Asia/Shanghai。未到期再答只记账。不抽取概念，不是 S1，不是 L2。托盘或小窗没有做。正式闪卡生成仍是 S1，排在第 5 条 L2 之后。连续使用 3 天的 Go/No-Go 还没做
 3. **本机 MCP**，以及用 Obsidian 或系统默认应用打开原文（含对外响应去掉绝对路径）。不挡住 ADR 0002 合并
 4. **同步通道预留**：许可模型、稳定 id、本机路径映射。不做移动端，也不做完整同步传输
 5. **L2 知识结构**：概念、出处、消歧、概念页。做完再进入 S1 正式出题

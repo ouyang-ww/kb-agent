@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,6 +15,8 @@ from kbagent.cli import app
 from kbagent.config import Settings
 from kbagent.errors import KBError, NotFoundError, StudyDisabledError
 from kbagent.kb import KnowledgeBase
+from kbagent.governance.validity import today_utc
+from kbagent.study.calendar import shanghai_today
 from kbagent.study.cards import HARDCODED_CARDS, normalize_answer
 from kbagent.study.scheduler import ReviewState, grade_for_outcome, schedule
 from kbagent.study.service import StudyService
@@ -162,6 +164,7 @@ def test_today_answer_persists_next_due(tmp_path):
         svc.close()
 
     assert result["correct"] == 1.0
+    assert result["schedule_updated"] is True
     assert result["grade"] == 4
     assert result["grader"] == "exact"
     assert result["confidence"] == 2
@@ -193,6 +196,7 @@ def test_today_answer_persists_next_due(tmp_path):
     finally:
         again.close()
 
+    assert second["schedule_updated"] is True
     assert second["interval_d"] == 3
     assert second["reps"] == 2
     assert second["next_due"] == (DAY + timedelta(days=4)).isoformat()
@@ -341,6 +345,136 @@ def test_enabling_study_does_not_change_search(kb):
         reopened.close()
 
 
+def test_same_day_reanswer_keeps_the_schedule(tmp_path):
+    path = tmp_path / "study.sqlite3"
+    svc = _open(path)
+    try:
+        first = svc.answer("rag-fullname", "Retrieval-Augmented Generation", on=DAY)
+        stored = _review(path, "rag-fullname")
+        second = svc.answer("rag-fullname", "不对", on=DAY)
+    finally:
+        svc.close()
+
+    assert first["schedule_updated"] is True
+    assert first["next_due"] == (DAY + timedelta(days=1)).isoformat()
+    assert second["correct"] == 0.0
+    assert second["schedule_updated"] is False
+    assert "下次到期不变" in second["schedule_note"]
+    assert second["next_due"] == first["next_due"]
+    assert second["ease"] == first["ease"]
+    assert second["interval_d"] == first["interval_d"]
+    assert second["reps"] == first["reps"]
+    assert second["lapses"] == first["lapses"]
+    kept = _review(path, "rag-fullname")
+    for key in ("next_due", "ease", "interval_d", "reps", "lapses", "updated_at"):
+        assert kept[key] == stored[key]
+    assert _attempt_count(path, "rag-fullname") == 2
+    conn = sqlite3.connect(path)
+    dues = [
+        row[0]
+        for row in conn.execute(
+            "SELECT next_due FROM attempts WHERE item_id = ?", ("rag-fullname",)
+        )
+    ]
+    conn.close()
+    assert dues == [first["next_due"], first["next_due"]]
+
+
+def test_answer_before_due_does_not_advance_sm2(tmp_path):
+    path = tmp_path / "study.sqlite3"
+    svc = _open(path)
+    try:
+        first = svc.answer("rag-index-sink", "写入向量库", on=DAY)
+        second = svc.answer(
+            "rag-index-sink", "写入向量库", on=DAY + timedelta(days=1)
+        )
+        stored = _review(path, "rag-index-sink")
+        early = svc.answer(
+            "rag-index-sink", "写入向量库", on=DAY + timedelta(days=2)
+        )
+        hidden = [row["id"] for row in svc.today(on=DAY + timedelta(days=3))]
+        due = [row["id"] for row in svc.today(on=DAY + timedelta(days=4))]
+    finally:
+        svc.close()
+
+    assert first["next_due"] == (DAY + timedelta(days=1)).isoformat()
+    assert second["schedule_updated"] is True
+    assert second["interval_d"] == 3
+    assert second["reps"] == 2
+    assert second["next_due"] == (DAY + timedelta(days=4)).isoformat()
+    assert early["correct"] == 1.0
+    assert early["schedule_updated"] is False
+    assert early["reps"] == 2
+    assert early["lapses"] == 0
+    assert early["ease"] == 2.5
+    assert early["interval_d"] == 3
+    assert early["next_due"] == second["next_due"]
+    # 若误推进，第三次答对会从第 2 天再加 round(3 × 2.5) = 8 天。
+    assert early["next_due"] != (DAY + timedelta(days=10)).isoformat()
+    kept = _review(path, "rag-index-sink")
+    for key in ("next_due", "ease", "interval_d", "reps", "lapses", "updated_at"):
+        assert kept[key] == stored[key]
+    assert _attempt_count(path, "rag-index-sink") == 3
+    assert "rag-index-sink" not in hidden
+    assert "rag-index-sink" in due
+
+
+def test_study_day_is_shanghai_when_utc_still_yesterday(tmp_path, monkeypatch):
+    # 上海 2026-11-12 00:30。进程若在 UTC，date.today() 仍是 11-11。
+    morning = datetime(2026, 11, 11, 16, 30, tzinfo=timezone.utc)
+    assert shanghai_today(morning) == date(2026, 11, 12)
+    assert morning.astimezone(timezone.utc).date() == date(2026, 11, 11)
+
+    path = tmp_path / "study.sqlite3"
+    svc = _open(path)
+    try:
+        seeded = svc.today(on=date(2026, 11, 12))
+        assert {row["next_due"] for row in seeded} == {"2026-11-12"}
+        monkeypatch.setattr("kbagent.study.calendar.clock", lambda: morning)
+        assert [row["id"] for row in svc.today()] == [row["id"] for row in seeded]
+        # 用 UTC 日去比，这三题都还没到期。
+        assert svc.today(on=morning.astimezone(timezone.utc).date()) == []
+
+        # 上海 11-12 答完，下次是 11-13。UTC 11-12 20:00 时上海已是 11-13。
+        # 若队列误用 UTC，这次作答会当成未到期，间隔停在 1 天。
+        first = svc.answer(
+            "rag-fullname", "Retrieval-Augmented Generation", on=date(2026, 11, 12)
+        )
+        assert first["schedule_updated"] is True
+        assert first["next_due"] == "2026-11-13"
+        evening = datetime(2026, 11, 12, 20, 0, tzinfo=timezone.utc)
+        assert shanghai_today(evening) == date(2026, 11, 13)
+        assert evening.astimezone(timezone.utc).date() == date(2026, 11, 12)
+        monkeypatch.setattr("kbagent.study.calendar.clock", lambda: evening)
+        assert "rag-fullname" in [row["id"] for row in svc.today()]
+        utc_view = [row["id"] for row in svc.today(on=evening.astimezone(timezone.utc).date())]
+        assert "rag-fullname" not in utc_view
+        moved = svc.answer("rag-fullname", "Retrieval-Augmented Generation")
+    finally:
+        svc.close()
+
+    assert moved["schedule_updated"] is True
+    assert moved["interval_d"] == 3
+    assert moved["reps"] == 2
+    assert moved["next_due"] == "2026-11-16"
+    assert _review(path, "rag-fullname")["next_due"] == "2026-11-16"
+
+
+def test_p2_expiry_day_stays_utc(monkeypatch):
+    instant = datetime(2026, 11, 11, 16, 30, tzinfo=timezone.utc)
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return instant.replace(tzinfo=None)
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr("kbagent.governance.validity.datetime", Frozen)
+    assert today_utc() == "2026-11-11"
+    assert shanghai_today(instant).isoformat() == "2026-11-12"
+
+
 def test_core_paths_do_not_reference_study():
     for name in ("search", "ask", "ingest", "ingest_text"):
         source = inspect.getsource(getattr(KnowledgeBase, name))
@@ -412,7 +546,18 @@ def test_cli_today_answer_loop(tmp_path, monkeypatch):
         body = json.loads(answered.stdout)
         assert body["correct"] == 1.0
         assert body["confidence"] == 3
-        assert body["next_due"] == (date.today() + timedelta(days=1)).isoformat()
+        assert body["schedule_updated"] is True
+        assert body["next_due"] == (shanghai_today() + timedelta(days=1)).isoformat()
+
+        again = runner.invoke(
+            app,
+            ["study", "answer", "rag-fullname", "--response", "不对", "--json"],
+        )
+        assert again.exit_code == 0, again.stdout
+        held = json.loads(again.stdout)
+        assert held["schedule_updated"] is False
+        assert held["next_due"] == body["next_due"]
+        assert "下次到期不变" in held["schedule_note"]
 
         remaining = json.loads(runner.invoke(app, ["study", "today", "--json"]).stdout)
         assert "rag-fullname" not in [row["id"] for row in remaining]
