@@ -1,7 +1,7 @@
 # 个人知识系统总体计划（v4）
 
 > 版本：**v4**（2026-10-29；范围决策 2026-11-03，见 §0.1）
-> 状态：**L1 已交付（v0.1.0）。原件不双写已落地。近期只认 [status §5](docs/status.md)：治理 P1、治理 P2 已落地；学习切片的 today → answer → 下次到期已落地。L2 / S1 未做。人生时间线排在其后。工作模块不是当前 MVP**
+> 状态：**L1 已交付（v0.1.0）。原件不双写已落地。近期只认 [status §5](docs/status.md)：治理 P1、治理 P2 已落地；学习切片的 today → answer → 下次到期已落地；本机 MCP 与打开原文已落地。L2 / S1、同步通道、托盘 / 小窗未做。人生时间线排在其后。工作模块不是当前 MVP**
 > 配套文档：[愿景](docs/vision.md) · [L1→L3 最小闭环拆解](docs/mvp-l1-to-l3.md) · [知识治理](docs/knowledge-governance.md) · [知识图谱与本体](docs/knowledge-graph-and-ontology.md) · [个人档案管理](docs/personal-archive.md) · [工作知识管理](docs/work-knowledge-management.md) · [ADR 0002 原件不双写](docs/adr/0002-no-original-duplication.md)
 > 历史：[v3（L1 交付计划）](docs/archive/PLAN-v3-l1.md)
 > 产品说明覆盖的是当前 MVP，不含工作模块。

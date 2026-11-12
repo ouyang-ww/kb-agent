@@ -30,6 +30,12 @@ cp .env.example .env        # 编辑 KB_LLM_API_KEY、KB_LLM_BASE_URL、KB_LLM_M
 # 服务与界面
 .venv/bin/kb serve          # REST API → http://127.0.0.1:8710 (docs: /docs)
 .venv/bin/kb chat           # Gradio，当前的开发界面 → http://127.0.0.1:7860
+
+# 本机 MCP（stdio，不监听端口）。学习模块关闭时只有 search / ask / open_original
+.venv/bin/kb mcp
+
+# 打开已绑定原文。只传文档 id；优先 Obsidian，否则系统默认应用
+.venv/bin/kb open <doc_id>
 ```
 
 产品主界面按计划是托盘或小窗，尚未实现。Gradio 保留给开发和回归。
@@ -155,12 +161,29 @@ kb.delete_document(doc_id); kb.stats()
 
 鉴权：配置 `KB_API_KEY`（等同 admin）或 `KB_API_READ_KEY` / `KB_API_ADMIN_KEY` 后，业务端点要求 `X-API-Key` 头；只读 Key 不能执行入库、删除、开关等管理操作。未配置任何 Key 时，`kb serve` 只能监听回环地址（`127.0.0.1` / `localhost` / `::1`），启动时打印一次警告，入库与删除对本机开放。`--host 0.0.0.0` 或其它非回环地址且没有 Key 时拒绝启动。`KB_API_REQUIRE_AUTH=true` 时，本机也必须配置 Key。库集成若自己调用 uvicorn，请把同一监听地址传给 `create_app(..., bind_host=...)`。
 
+**方式三：本机 MCP**（stdio），在客户端里把命令配成 `kb mcp`：
+
+```json
+{
+  "mcpServers": {
+    "kbagent": {
+      "command": ".venv/bin/kb",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+工具是 `search`、`ask`、`open_original`。`study.enabled` 打开后才有 `study`（`action` 为 `today` 或 `answer`），并通知客户端刷新工具列表。`open_original` 只接受 `doc_id`，由本机用已绑定路径打开原文；文档必须是默认检索能返回的（过期或不在允许 scope 里的打不开，也没有 include-expired 旁路）。优先 Obsidian，启动失败再用系统默认应用。响应默认去掉绝对 `source_path` / `image_path`（`KB_EXPOSE_SOURCE_PATHS` 默认关）。没有读文件、列目录或执行命令的工具。
+
+命令行打开同一篇原文：`.venv/bin/kb open <doc_id>`。
+
 完整示例见 `examples/use_as_library.py` 与 `examples/call_api.py`。
 
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 175 个测试：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/存储抽象/治理
+.venv/bin/python -m pytest -q          # 257 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文
 ```
 
 ## 目录结构
@@ -181,6 +204,8 @@ src/kbagent/
 ├── eval/                       # dataset / metrics / judge / runner / reports
 ├── kb.py                       # KnowledgeBase 门面
 ├── cli.py  ui/chat.py  api/    # CLI / Gradio / FastAPI
+├── mcp/server.py               # 本机 MCP（stdio）
+├── open_original.py            # 按已绑定路径打开原文
 ```
 
 ## Roadmap
@@ -193,7 +218,7 @@ src/kbagent/
 - [ ] **P1 可信与治理**：可答性闸门、引用契约、级联 consumers、库外拒答评测、检索 fail-closed scope
 - [ ] **P2 严格模式**：声明校验、过期/冲突检测、近似去重
 - [ ] **学习切片**：硬编码题、作答、下次到期。不抽取概念。托盘 / 小窗可在此起步
-- [ ] **本机 MCP**，以及用 Obsidian 或系统默认应用打开原文
+- [x] **本机 MCP**，以及用 Obsidian 或系统默认应用打开原文（`kb mcp` / `kb open <doc_id>`）
 - [ ] **同步通道预留**：许可模型与稳定 id。不做移动端，也不做完整传输
 - [ ] **L2 知识结构**：概念与关系抽取、去重、缺口分析、概念页
 - [ ] **S1 正式出题**：依赖 L2
