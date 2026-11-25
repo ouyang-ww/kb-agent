@@ -1,4 +1,4 @@
-"""命令行入口：kb ingest / search / ask / list / delete / open / mcp / stats / serve / chat / eval / eval-build。"""
+"""命令行入口：kb ingest / search / ask / list / delete / open / mcp / sync / stats / serve / chat / eval / eval-build。"""
 
 from __future__ import annotations
 
@@ -21,9 +21,11 @@ app = typer.Typer(add_completion=False, help="个人知识库 RAG Agent")
 config_app = typer.Typer(help="运行时配置（热切换，无需重启）")
 study_app = typer.Typer(help="学习扩展（可选，默认关闭）")
 governance_app = typer.Typer(help="治理工具")
+sync_app = typer.Typer(help="同步通道预留（默认不上传，不传输内容）")
 app.add_typer(config_app, name="config")
 app.add_typer(study_app, name="study")
 app.add_typer(governance_app, name="governance")
+app.add_typer(sync_app, name="sync")
 
 
 def _kb(settings: Settings | None = None) -> KnowledgeBase:
@@ -497,6 +499,110 @@ def mcp():
         serve_stdio(kb)
     finally:
         kb.close()
+
+
+def _sync_call(fn):
+    """同步预留不打开知识库，因此也不加载嵌入模型。"""
+    from .sync.service import SyncReservation
+
+    reservation = SyncReservation(Settings().sync_db)
+    try:
+        return fn(reservation)
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        reservation.close()
+
+
+@sync_app.command("status")
+def sync_status():
+    """查看本机同步预留：设备稳定 id 和许可。不打印绝对路径，也不传输。"""
+    info = _sync_call(lambda reservation: reservation.describe())
+    typer.echo(f"设备 {info['device_id']}")
+    typer.echo("传输 开" if info["transport"] else "传输 关")
+    typer.echo("移动端 有" if info["mobile_client"] else "移动端 无")
+    typer.echo("原件全文 会写入" if info["copies_original"] else "原件全文 不传")
+    for name, enabled in info["grants"].items():
+        typer.echo(f"{name}={'on' if enabled else 'off'}")
+    typer.echo(f"路径映射 {info['mapped']}")
+
+
+def _grant_key(name: str) -> str:
+    from .sync.permissions import normalize_grant_name
+
+    try:
+        return normalize_grant_name(name)
+    except KBError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+
+@sync_app.command("grant")
+def sync_grant(
+    name: str = typer.Argument(..., help="remote、lan 或 health-remote"),
+):
+    """打开一项同步许可。remote 与 lan 分开；健康数据进入远程要单独许可。"""
+    key = _grant_key(name)
+    grants = _sync_call(lambda reservation: reservation.grant(key))
+    typer.echo(f"{key}={'on' if grants[key] else 'off'}")
+
+
+@sync_app.command("revoke")
+def sync_revoke(
+    name: str = typer.Argument(..., help="remote、lan 或 health-remote"),
+):
+    """收回一项同步许可。不删除路径映射，也不传输。"""
+    key = _grant_key(name)
+    grants = _sync_call(lambda reservation: reservation.revoke(key))
+    typer.echo(f"{key}={'on' if grants[key] else 'off'}")
+
+
+@sync_app.command("bind")
+def sync_bind(
+    path: str = typer.Argument(..., help="本机文件夹。路径只存在这台设备上"),
+):
+    """把本机文件夹映射到稳定 id。不读取文件，响应里不带绝对路径。"""
+    stable_id = _sync_call(lambda reservation: reservation.bind_path(path))
+    typer.echo(f"已映射 {stable_id}")
+
+
+@sync_app.command("rebind")
+def sync_rebind(
+    stable_id: str = typer.Argument(..., help="文件夹的稳定 id"),
+    path: str = typer.Argument(..., help="这台设备上的新文件夹"),
+):
+    """同一稳定 id 改映射到另一个本机文件夹。"""
+    kept = _sync_call(lambda reservation: reservation.rebind_path(stable_id, path))
+    typer.echo(f"已映射 {kept}")
+
+
+@sync_app.command("paths")
+def sync_paths():
+    """列出已映射的稳定 id。不打印绝对路径。"""
+    ids = _sync_call(lambda reservation: reservation.mapped_ids())
+    if not ids:
+        typer.echo("还没有本机路径映射")
+        return
+    for stable_id in ids:
+        typer.echo(stable_id)
+
+
+@sync_app.command("id")
+def sync_id(
+    vault_id: str = typer.Argument(..., help="文件夹的稳定 id"),
+    relative: str = typer.Argument(..., help="文件夹内的相对路径"),
+    local_doc_id: str = typer.Option(
+        "", "--local-doc", help="可选的本机文档 id，不是跨设备主键"
+    ),
+):
+    """给一条记录分配稳定 id。不读取文件，也不传输。"""
+    record_id = _sync_call(
+        lambda reservation: reservation.register_record(
+            vault_id, relative, local_doc_id=local_doc_id
+        )
+    )
+    typer.echo(record_id)
 
 
 # ================= 服务 =================

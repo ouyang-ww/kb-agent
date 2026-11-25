@@ -91,6 +91,13 @@ kb-agent/
 │       │   ├── __init__.py
 │       │   ├── factory.py
 │       │   └── filters.py
+│       ├── sync/
+│       │   ├── __init__.py
+│       │   ├── ids.py
+│       │   ├── paths.py
+│       │   ├── permissions.py
+│       │   ├── service.py
+│       │   └── store.py
 │       ├── ui/
 │       │   ├── __init__.py
 │       │   └── chat.py
@@ -149,6 +156,7 @@ kb-agent/
 | `src/kbagent/governance/` | 治理：docs_meta / doc_events / doc_relations / 时效 / 近似去重 / scope / answer_log / audit_log / manifest |
 | `src/kbagent/flags.py` | 运行时开关：runtime_flags + 热切换 |
 | `src/kbagent/storage/` | 存储抽象：后端中立 Filter、适配器工厂 |
+| `src/kbagent/sync/` | 同步通道预留：许可、稳定 id、本机路径映射。不传输，不保存原件全文 |
 | `src/kbagent/vectorstore/` + `document_store/` | VectorStore / DocumentStore 协议；Chroma(切块) + SQLite(路径、哈希、摘要、切块定位；inline 正文) |
 | `src/kbagent/vision/` | 多模态：图片提取 → 描述 → OCR → 图文单元 |
 | `src/kbagent/eval/` | 评估：评测集 / 指标(recall@k, accuracy…) / LLM-as-judge / 对比实验 |

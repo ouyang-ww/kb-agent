@@ -183,7 +183,7 @@ kb.delete_document(doc_id); kb.stats()
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 257 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文
+.venv/bin/python -m pytest -q          # 272 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文/同步预留
 ```
 
 ## 目录结构
@@ -206,6 +206,7 @@ src/kbagent/
 ├── cli.py  ui/chat.py  api/    # CLI / Gradio / FastAPI
 ├── mcp/server.py               # 本机 MCP（stdio）
 ├── open_original.py            # 按已绑定路径打开原文
+├── sync/                       # 同步通道预留：许可、稳定 id、本机路径映射
 ```
 
 ## Roadmap
@@ -219,7 +220,7 @@ src/kbagent/
 - [ ] **P2 严格模式**：声明校验、过期/冲突检测、近似去重
 - [ ] **学习切片**：硬编码题、作答、下次到期。不抽取概念。托盘 / 小窗可在此起步
 - [x] **本机 MCP**，以及用 Obsidian 或系统默认应用打开原文（`kb mcp` / `kb open <doc_id>`）
-- [ ] **同步通道预留**：许可模型与稳定 id。不做移动端，也不做完整传输
+- [x] **同步通道预留**：许可模型、稳定 id、本机路径映射。不做移动端，也不做完整传输
 - [ ] **L2 知识结构**：概念与关系抽取、去重、缺口分析、概念页
 - [ ] **S1 正式出题**：依赖 L2
 - [ ] **人生时间线前置**：敏感范围只走本地模型或拒绝；问答不进明文日志

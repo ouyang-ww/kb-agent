@@ -208,6 +208,11 @@ class Settings(BaseSettings):
         return self.storage_dir / "study.sqlite3"
 
     @property
+    def sync_db(self) -> Path:
+        """同步预留库。核心摄入 / 检索 / 问答不创建它。"""
+        return self.storage_dir / "sync.sqlite3"
+
+    @property
     def embedding_manifest(self) -> str:
         """向量版本标识：显式配置优先，否则由模型 + 切块版本派生。"""
         if self.embedding_manifest_id:

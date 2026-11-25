@@ -1,7 +1,7 @@
 # 项目进度
 
 > 更新时间：2026-11-12
-> 当前状态：**v0.1.0（L1 已交付）+ P0 完成 + 原件不双写已落地 + P1 可信与治理已落地 + P2 严格模式 / 过期冲突 / 近似去重已落地 + 学习切片（硬编码 3 题的 today → answer → 下次到期）已落地 + 本机 MCP 与打开原文已落地**
+> 当前状态：**v0.1.0（L1 已交付）+ P0 完成 + 原件不双写已落地 + P1 可信与治理已落地 + P2 严格模式 / 过期冲突 / 近似去重已落地 + 学习切片（硬编码 3 题的 today → answer → 下次到期）已落地 + 本机 MCP 与打开原文已落地 + 同步通道预留已落地**
 > 配套：[PLAN v4](../PLAN.md) · [架构设计](./architecture.md) · [知识治理](./knowledge-governance.md)
 
 ---
@@ -64,7 +64,15 @@
 - **打开原文**：`kb open <doc_id>` 与 MCP `open_original` 只用该文档已经保存的绑定路径，并且和默认检索同一道门（`_default_retrievable`）。隐藏、private、secret、已过期，以及不在默认 scope 允许列表（`default` / `work`，再加配置的 default scope）里的文档都不能打开。没有 `--include-expired` 旁路。优先 Obsidian，启动失败再改用系统默认应用。不接受路径，不列目录，不读正文，不执行 shell。失败和成功都不带绝对路径
 - **路径**：MCP 与 REST 共用 `public_source_path`。`KB_EXPOSE_SOURCE_PATHS` 默认关，绝对 `source_path` / `image_path` 置空；相对路径仍返回。打开原文由本机服务完成，调用方不需要绝对路径
 - **ADR 0002**：打开原文以及 MCP 的检索 / 问答都不把绑定原件的整篇正文写回 `documents.sqlite3`
-- **没有做**：托盘 / 小窗、同步通道、L2 / S1、题库去重、mentions / items / reports / 概念页
+- **没有做**：托盘 / 小窗、L2 / S1、题库去重、mentions / items / reports / 概念页。同步通道预留见下一节
+
+### 同步通道预留（2026-11-25）
+
+- **许可**：默认全部关闭，不上云。`remote`（加密远程）和 `lan`（同 Wi-Fi 配对）分开，互不包含。只打开 `remote` 时，元数据、摘要、切块、嵌入、学习进度、时间线可以进入以后的传输；健康数据还要 `health_remote`。只打开 `health_remote` 不够。收回 `remote` 之后，远程健康不再有效，单独的健康许可还留着，再次打开 `remote` 时恢复。局域网许可打开后，健康数据随这条通道走，因为单独许可只约束远程。原件全文两条通道都拒绝
+- **稳定 id**：设备 `dev_`、文件夹 `vlt_`、记录 `rec_`，后面各加 32 位十六进制。不由本机路径、主机名或文档内容哈希派生。已有 `doc_id` 仍是本机文档主键，可以记在记录上当本机指针，不是跨设备主键
+- **本机路径映射**：文件夹的稳定 id 对到这台设备上的一个目录。目录换地方用 `kb sync rebind`，稳定 id 不变。记录位置是文件夹内的相对路径；改相对路径不换稳定 id。绝对路径不是主键。命令输出不带绝对路径。符号链接如果指向映射以外，拒绝登记。中间目录已经是指向外部的符号链接时，末端文件还不存在也拒绝，失败信息不带绝对路径
+- **库**：`sync.sqlite3`。核心摄入 / 检索 / 问答不创建它，也不读它。库里没有原件全文
+- **没有做**：不传输、不加密打包、不配对、不做移动端、不写托盘 / 小窗、不开始 L2 / S1。见 ADR 0002
 
 ### 原件不双写（2026-11-04，ADR 0002）
 
@@ -76,7 +84,7 @@
 
 ## 2. 当前验证
 
-- 全量测试：**257 passed**（2026-11-12，含打开原文与默认检索同一道门）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即当时 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
+- 全量测试：**272 passed**（2026-11-25，含同步通道预留，以及中间符号链接越出映射时拒绝登记）。`refusal_recall` 1.0 是 PR #26 HEAD `ff7961a`（即当时 master `89462ae`）上的正式 QA，不是这次未标注重跑的新结果
 - `STRUCTURE.md` 已补上源文件回读与父全文迁移相关文件
 - 测试历史：本地 `test_history.log`（已 gitignore，不随仓库发布）
 
@@ -105,7 +113,7 @@
 - `orphaned_copy` 表示源文件已经不在，库内全文留到用户处理。把文件放回且哈希一致后再跑 `migrate-parents`，会升为 `bound` 并删掉副本
 - `diverged` 表示源文件还在，但和已入库哈希不一致（不用 `orphaned_copy`，因为文件没丢）。迁移保留正文，并在结果里提示重新入库。文件改回与哈希一致后再跑一次，才会升为 `bound` 并删掉副本
 - 闸 3 声明校验、过期/冲突和近似去重已在 P2 落地。题库去重、mentions / items / reports、一等历史查询、embedding 迁移演练还没有。升级前缺 `valid_until` 的旧切块要再跑一次 `kb governance backfill`，否则默认检索的时效 `where` 不会命中它们
-- 同步通道、托盘 / 小窗尚未实现。本机 MCP（stdio）和按绑定路径打开原文已落地。MVP 不做移动端
+- 同步通道预留已落地：许可模型、稳定 id、本机路径映射，默认关闭，不传输内容，不做移动端。托盘 / 小窗尚未实现。本机 MCP（stdio）和按绑定路径打开原文已落地
 - 工作知识管理不是当前 MVP
 
 ## 4.1 哈希迁移（12 hex → 64 hex）
@@ -127,8 +135,8 @@
 
 1. **P2 已落地**（2026-11-11）：闸 3 / `KB_ANSWER_STRICT`、过期与冲突、近似去重、近邻陷阱集 / 冲突集 / 过期集。题库去重仍等学习模块。P1 的闸门、引用契约、库外拒答集和 fail-closed scope 没有在这里重做。mentions / items / reports 仍等学习模块
 2. **学习切片已落地**（2026-11-12）：3 道硬编码题，`kb study today` → `kb study answer` → 下次到期。今天按 Asia/Shanghai。未到期再答只记账。不抽取概念，不是 S1，不是 L2。托盘或小窗没有做。正式闪卡生成仍是 S1，排在第 5 条 L2 之后。连续使用 3 天的 Go/No-Go 还没做
-3. **本机 MCP 与打开原文已落地**（2026-11-12）：`kb mcp`（stdio）提供 search / ask；`study.enabled` 打开后才有 study，并通知工具列表变化。`kb open <doc_id>` 与 MCP `open_original` 用已绑定路径打开原文，门和默认检索相同（含过期与 scope 允许列表），没有 `--include-expired` 旁路。优先 Obsidian，启动失败再用系统默认应用。对外响应默认去掉绝对路径。不监听端口，也不是通用文件或 shell 工具。托盘 / 小窗、同步通道、L2 都没有做
-4. **同步通道预留**：许可模型、稳定 id、本机路径映射。不做移动端，也不做完整同步传输
+3. **本机 MCP 与打开原文已落地**（2026-11-12）：`kb mcp`（stdio）提供 search / ask；`study.enabled` 打开后才有 study，并通知工具列表变化。`kb open <doc_id>` 与 MCP `open_original` 用已绑定路径打开原文，门和默认检索相同（含过期与 scope 允许列表），没有 `--include-expired` 旁路。优先 Obsidian，启动失败再用系统默认应用。对外响应默认去掉绝对路径。不监听端口，也不是通用文件或 shell 工具。托盘 / 小窗、L2 都没有做。同步通道预留见下一条
+4. **同步通道预留已落地**（2026-11-25）：许可模型、稳定 id、本机路径映射。`remote` 与 `lan` 分开，健康数据进入远程要单独许可，原件全文不进这条通道。不做移动端，也不做完整同步传输
 5. **L2 知识结构**：概念、出处、消歧、概念页。做完再进入 S1 正式出题
 6. **人生时间线前置**：健康和敏感范围只走本地模型或直接拒绝；这些问答不进明文日志
 7. **人生时间线**：事实、事件、健康。工作模块不是当前 MVP
@@ -147,6 +155,14 @@
 
 # 用已绑定路径打开原文。优先 Obsidian，否则系统默认应用。不接受路径
 .venv/bin/kb open <doc_id>
+
+# 同步通道预留。默认不上传。不传输内容，也不打印绝对路径
+.venv/bin/kb sync status
+.venv/bin/kb sync grant remote
+.venv/bin/kb sync grant health-remote
+.venv/bin/kb sync bind <folder>
+.venv/bin/kb sync id <vault_id> <relative>
+.venv/bin/kb sync revoke remote
 
 # 学习切片。默认关闭。开启不回填历史，也不抽概念
 .venv/bin/kb study enable
