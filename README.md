@@ -183,7 +183,7 @@ kb.delete_document(doc_id); kb.stats()
 ## 开发与测试
 
 ```bash
-.venv/bin/python -m pytest -q          # 271 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文/同步预留
+.venv/bin/python -m pytest -q          # 272 passed：切块/清洗/存储/检索/重排/意图/管线/评估/API/多模态/治理/学习切片/MCP/打开原文/同步预留
 ```
 
 ## 目录结构

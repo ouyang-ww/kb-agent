@@ -39,23 +39,37 @@ def normalize_relative(relative: str) -> str:
     return "/".join(parts)
 
 
+def _require_under(path: Path, base: Path) -> None:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        raise KBError("路径越出本机映射") from None
+
+
 def join_under(root: Path, relative: str) -> Path:
-    """把相对位置接到本机根上。符号链接若指向根以外，拒绝。"""
+    """把相对位置接到本机根上。符号链接若指向根以外，拒绝。
+
+    逐段检查已经存在的目录和符号链接。末端文件还不存在时，
+    中间目录若是指向根以外的符号链接，不能因为叶子缺失就放过。
+    """
     rel = normalize_relative(relative)
     base = Path(root).resolve()
-    joined = base.joinpath(*PurePosixPath(rel).parts)
-    try:
-        joined.relative_to(base)
-    except ValueError as exc:
-        raise KBError("路径越出本机映射") from exc
-    if not joined.exists():
-        return joined
-    real = joined.resolve()
-    try:
-        real.relative_to(base)
-    except ValueError as exc:
-        raise KBError("路径越出本机映射") from exc
-    return real
+    current = base
+    parts = PurePosixPath(rel).parts
+    for index, part in enumerate(parts):
+        nxt = current.joinpath(part)
+        if nxt.exists() or nxt.is_symlink():
+            try:
+                real = nxt.resolve()
+            except (OSError, RuntimeError):
+                raise KBError("路径越出本机映射") from None
+            _require_under(real, base)
+            current = real
+            continue
+        rest = current.joinpath(*parts[index:])
+        _require_under(rest, base)
+        return rest
+    return current
 
 
 def relative_under(root: Path, local_path: Path) -> str | None:

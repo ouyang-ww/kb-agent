@@ -273,6 +273,67 @@ def test_nested_mapping_wins_and_escape_is_rejected(tmp_path):
     assert SENTINEL.encode("utf-8") not in blob
 
 
+def test_intermediate_symlink_with_missing_leaf_is_rejected(tmp_path, monkeypatch):
+    """中间目录指向映射以外时，末端文件还不存在也要拒绝。"""
+    root = tmp_path / "vault"
+    outside = tmp_path / "OUTSIDE_SYNC_ROOT_9f3a"
+    real = root / "real"
+    root.mkdir()
+    outside.mkdir()
+    real.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    (root / "alias").symlink_to(real, target_is_directory=True)
+    (root / "broken").symlink_to(outside / "missing-dir", target_is_directory=True)
+
+    reservation = _open(tmp_path / "sync.sqlite3")
+    try:
+        vault_id = reservation.bind_path(root)
+        with pytest.raises(KBError) as escaped:
+            reservation.register_record(vault_id, "link/missing.md")
+        assert str(outside) not in str(escaped.value)
+        assert str(root) not in str(escaped.value)
+        with pytest.raises(KBError) as resolved:
+            reservation.resolve(vault_id, "link/missing.md")
+        assert str(outside) not in str(resolved.value)
+        with pytest.raises(KBError) as broken:
+            reservation.register_record(vault_id, "broken/missing.md")
+        assert str(outside) not in str(broken.value)
+        assert reservation.locate(root / "link" / "missing.md") is None
+        kept = reservation.register_record(vault_id, "alias/new.md")
+        assert kept.startswith("rec_")
+        assert reservation.resolve(vault_id, "alias/new.md") == (real / "new.md").resolve()
+        assert reservation.record(kept)["relative_path"] == "alias/new.md"
+    finally:
+        reservation.close()
+
+    conn = sqlite3.connect(tmp_path / "sync.sqlite3")
+    try:
+        relatives = [
+            row[0]
+            for row in conn.execute("SELECT relative_path FROM records")
+        ]
+    finally:
+        conn.close()
+    assert relatives == ["alias/new.md"]
+    blob = (tmp_path / "sync.sqlite3").read_bytes()
+    assert b"OUTSIDE_SYNC_ROOT_9f3a" not in blob
+    assert SENTINEL.encode("utf-8") not in blob
+
+    storage = tmp_path / "kb"
+    monkeypatch.setenv("KB_STORAGE_DIR", str(storage))
+    runner = CliRunner()
+    bound = runner.invoke(app, ["sync", "bind", str(root)])
+    assert bound.exit_code == 0, bound.output
+    vault_id = bound.stdout.strip().removeprefix("已映射 ").strip()
+    failed = runner.invoke(app, ["sync", "id", vault_id, "link/missing.md"])
+    assert failed.exit_code == 1
+    assert "路径越出本机映射" in failed.output
+    assert str(outside) not in failed.output
+    assert str(root) not in failed.output
+    assert "OUTSIDE_SYNC_ROOT_9f3a" not in failed.output
+    assert b"OUTSIDE_SYNC_ROOT_9f3a" not in (storage / "sync.sqlite3").read_bytes()
+
+
 def test_schema_has_no_original_text_and_path_is_not_the_key(tmp_path):
     path = tmp_path / "sync.sqlite3"
     reservation = _open(path)
