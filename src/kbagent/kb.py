@@ -107,6 +107,8 @@ class KnowledgeBase:
         # 学习库只在 study.enabled 打开且真正调用时创建。关闭时核心路径不碰它。
         self._study = None
         self._study_api = None
+        # 同步预留库只在访问 sync 时创建。摄入 / 检索 / 问答不打开它。
+        self._sync = None
         self._llm = llm or LLMClient(
             base_url=self.settings.llm_base_url,
             api_key=self.settings.llm_api_key,
@@ -424,6 +426,15 @@ class KnowledgeBase:
 
             self._study_api = StudyAPI(self._open_study)
         return self._study_api
+
+    @property
+    def sync(self):
+        """同步通道预留。不传输内容，也不读取学习库。"""
+        if self._sync is None:
+            from .sync.service import SyncReservation
+
+            self._sync = SyncReservation(self.settings.sync_db)
+        return self._sync
 
     # ================= 观测 / 回填 =================
     def get_embedding_manifest(self) -> dict[str, Any] | None:
@@ -832,6 +843,10 @@ class KnowledgeBase:
         self._study = None
         if study is not None:
             study.close()
+        sync = self._sync
+        self._sync = None
+        if sync is not None:
+            sync.close()
         self._indexer.close()
         self.flags.close()
         self.governance.close()
