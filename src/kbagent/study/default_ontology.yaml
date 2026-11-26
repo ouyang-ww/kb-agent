@@ -1,0 +1,13 @@
+# 本体-lite。类型白名单；模型不能发明这里没有的关系。
+# 别名只用于第 3 步之前的精确匹配（规范化后相等才自动合并）。
+domain: general
+entity_types: [Concept, Method, Tool, Metric]
+relation_types:
+  prerequisite: { from: Concept, to: Concept }
+  part_of: { from: Concept, to: Concept }
+  implemented_by: { from: Method, to: Tool }
+  measured_by: { from: Method, to: Metric }
+  related: { from: Concept, to: Concept }
+aliases:
+  RAG: ["检索增强生成", "Retrieval-Augmented Generation"]
+  嵌入: ["Embedding", "embedding"]

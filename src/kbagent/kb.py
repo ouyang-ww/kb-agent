@@ -38,6 +38,18 @@ from .vision.indexer import VisionIndexer
 
 logger = logging.getLogger(__name__)
 
+_DERIVED_CONSUMERS = ("mentions", "concept_pages")
+_DERIVED_ARMED = "study.concepts.armed"
+
+
+def _drain_touched(report: dict[str, Any]) -> bool:
+    for item in report.values():
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("processed") or 0) or int(item.get("dead_letter") or 0):
+            return True
+    return False
+
 
 def _stricter_visibility(
     doc_scope: str | None,
@@ -171,6 +183,13 @@ class KnowledgeBase:
         self._vector_consumer = VectorIndexConsumer(
             self._vector_store, self._doc_store, self.settings
         )
+        self._derived_gate = threading.Lock()
+        self._derived_pending = False
+        self._derived_stop = threading.Event()
+        self._derived_thread: threading.Thread | None = None
+        self._last_derived_report: dict[str, Any] | None = None
+        self._extractor_override = None
+        self._arm_derived_if_needed()
 
     # ================= 写入 / 管理 =================
     def ingest(
@@ -182,13 +201,15 @@ class KnowledgeBase:
         scope: str | None = None,
     ) -> IngestReport:
         with self._lock:
-            return self._indexer.ingest_path(
+            report = self._indexer.ingest_path(
                 path,
                 collection=collection,
                 force=force,
                 recursive=recursive,
                 scope=scope,
             )
+        self._after_write()
+        return report
 
     def ingest_text(
         self,
@@ -218,7 +239,8 @@ class KnowledgeBase:
                 "ok": bool(doc_id) and partial is None,
                 "partial": dict(partial) if partial else None,
             }
-            return doc_id
+        self._after_write()
+        return doc_id
 
     def delete_document(
         self,
@@ -369,8 +391,187 @@ class KnowledgeBase:
             return report
 
     def drain_consumers(self) -> dict[str, Any]:
-        """推进已实现的消费者。mentions / items / reports 只出现在 residual 里。"""
-        return drain_consumers(self.governance, [self._vector_consumer])
+        """推进已实现的消费者。
+
+        概念消费者只在总开关和概念开关都打开时挂上。
+        关掉时 mentions / concept_pages 仍留在 residual，游标不动，也不打开学习库。
+        """
+        consumers: list[Any] = [self._vector_consumer]
+        if self._derived_active():
+            consumers.extend(self._derived_consumers())
+        return drain_consumers(self.governance, consumers)
+
+    def backfill_concepts(self, *, dry_run: bool = False) -> dict[str, Any]:
+        """显式重放历史事件。打开开关不会走这里。"""
+        if not self.flag("study.enabled"):
+            raise StudyDisabledError()
+        if not self.flag("study.concepts"):
+            raise KBError("概念抽取已关闭（study.concepts=off）")
+        docs = self._doc_store.list()
+        visible = [doc.doc_id for doc in docs if self._doc_in_concepts(doc.doc_id)]
+        summary = {
+            "applied": False,
+            "documents": len(docs),
+            "visible": len(visible),
+        }
+        if dry_run:
+            return summary
+        self._open_study().store.clear_extractions()
+        for name in _DERIVED_CONSUMERS:
+            self.governance.set_cursor(name, 0)
+        summary["applied"] = True
+        summary["consumers"] = self.drain_consumers()
+        return summary
+
+    def flush_derived(self) -> dict[str, Any]:
+        """等这一轮派生消费结束。开关关闭时什么都不做，也不创建学习库。"""
+        if not self._derived_active():
+            return {"skipped": True}
+        self._kick_derived()
+        self._join_derived()
+        with self._lock:
+            follow = self.drain_consumers()
+        if _drain_touched(follow):
+            return follow
+        if self._last_derived_report:
+            return self._last_derived_report
+        return follow
+
+    def _after_write(self) -> None:
+        if not self._derived_active():
+            return
+        self._kick_derived()
+
+    def _derived_active(self) -> bool:
+        return self.flag("study.enabled") and self.flag("study.concepts")
+
+    def _arm_derived_if_needed(self) -> None:
+        """进程起来时如果概念抽取已经开着，只跳过此刻之前的事件。"""
+        if not self._derived_active():
+            return
+        if self.governance.get_pointer(_DERIVED_ARMED) == "1":
+            return
+        self._arm_derived(jump=False)
+
+    def _arm_derived(self, *, jump: bool) -> None:
+        latest = self.governance.latest_event_id()
+        for name in _DERIVED_CONSUMERS:
+            current = self.governance.get_cursor(name)
+            if jump or current == 0:
+                if latest >= current:
+                    self.governance.set_cursor(name, latest)
+        self.governance.set_pointer(_DERIVED_ARMED, "1")
+
+    def _kick_derived(self) -> None:
+        with self._derived_gate:
+            if self._derived_stop.is_set():
+                return
+            self._derived_pending = True
+            alive = self._derived_thread
+            if alive is not None and alive.is_alive():
+                return
+            self._derived_thread = threading.Thread(
+                target=self._derived_loop,
+                name="kb-derived",
+                daemon=True,
+            )
+            self._derived_thread.start()
+
+    def _derived_loop(self) -> None:
+        while not self._derived_stop.is_set():
+            with self._derived_gate:
+                if not self._derived_pending:
+                    return
+                self._derived_pending = False
+            try:
+                with self._lock:
+                    if not self._derived_active():
+                        return
+                    report = self.drain_consumers()
+                self._remember_derived_report(report)
+            except Exception:
+                logger.exception("派生数据消费失败，入库结果保持不变")
+                return
+
+    def _remember_derived_report(self, report: dict[str, Any]) -> None:
+        current = self._last_derived_report
+        if not current:
+            self._last_derived_report = report
+            return
+        merged = dict(current)
+        for key, item in report.items():
+            if not isinstance(item, dict) or "processed" not in item:
+                merged[key] = item
+                continue
+            old = merged.get(key)
+            if not isinstance(old, dict):
+                merged[key] = item
+                continue
+            merged[key] = {
+                "processed": int(old.get("processed") or 0) + int(item.get("processed") or 0),
+                "dead_letter": int(old.get("dead_letter") or 0) + int(item.get("dead_letter") or 0),
+                "errors": list(old.get("errors") or []) + list(item.get("errors") or []),
+                "cursor": item.get("cursor", old.get("cursor")),
+            }
+        self._last_derived_report = merged
+
+    def _join_derived(self, timeout: float = 30.0) -> None:
+        thread = self._derived_thread
+        if thread is None or not thread.is_alive() or thread is threading.current_thread():
+            return
+        thread.join(timeout=timeout)
+
+    def _derived_consumers(self) -> list[Any]:
+        index = self._concept_index()
+        from .study.consumer import ConceptPagesConsumer, MentionsConsumer
+
+        return [MentionsConsumer(index), ConceptPagesConsumer(index)]
+
+    def _concept_index(self):
+        from .study.concepts import ConceptIndex
+
+        return ConceptIndex(
+            self._open_study().store,
+            self.settings,
+            chunks_for=self._chunks_for,
+            doc_allowed=self._doc_in_concepts,
+            doc_label=self._doc_public_label,
+            embedder=self._embedder,
+            pages_dir=self.settings.storage_dir / "concept_pages",
+            llm=self._llm,
+            extractor=self._extractor_override,
+        )
+
+    def _chunks_for(self, doc_id: str) -> list[dict[str, str]]:
+        from .storage.filters import eq
+
+        doc = self._doc_store.get(doc_id)
+        if doc is None:
+            return []
+        collection = doc.collection or self.settings.default_collection
+        try:
+            rows = self._vector_store.get(collection, where=eq("doc_id", doc_id))
+        except Exception:
+            logger.warning("读取文档 %s 的切块失败，跳过概念抽取", doc_id, exc_info=True)
+            return []
+        chunks = [
+            {"id": row.id, "text": row.document or "", "doc_id": doc_id}
+            for row in rows
+            if (row.document or "").strip()
+        ]
+        chunks.sort(key=lambda item: item["id"])
+        return chunks
+
+    def _doc_in_concepts(self, doc_id: str) -> bool:
+        meta = self.governance.get_meta(doc_id)
+        if meta is not None and meta.exclude_from_learning:
+            return False
+        return self._default_retrievable(doc_id)
+
+    def _doc_public_label(self, doc_id: str) -> dict[str, str]:
+        doc = self._doc_store.get(doc_id)
+        title = doc.title if doc is not None and doc.title else doc_id
+        return {"doc_id": doc_id, "title": title}
 
     def _sync_chunk_status(self, collection: str, doc_id: str, status: str) -> None:
         try:
@@ -400,10 +601,14 @@ class KnowledgeBase:
         return self.flags.get(name)
 
     def set_flag(self, name: str, enabled: bool, actor: str = "local") -> bool:
+        before = self._derived_active()
         value = self.flags.set(name, enabled, actor=actor)
         self.governance.record_audit(
             "flag.set", name, actor=actor, detail={"enabled": value}
         )
+        if self._derived_active() and not before:
+            # 打开时把游标放到当前事件末尾，不回放历史。
+            self._arm_derived(jump=True)
         return value
 
     def _open_study(self):
@@ -424,7 +629,7 @@ class KnowledgeBase:
         if self._study_api is None:
             from .study.api import StudyAPI
 
-            self._study_api = StudyAPI(self._open_study)
+            self._study_api = StudyAPI(self._open_study, self._concept_index)
         return self._study_api
 
     @property
@@ -839,6 +1044,10 @@ class KnowledgeBase:
         )
 
     def close(self) -> None:
+        self._derived_stop.set()
+        with self._derived_gate:
+            self._derived_pending = False
+        self._join_derived(timeout=2.0)
         study = self._study
         self._study = None
         if study is not None:

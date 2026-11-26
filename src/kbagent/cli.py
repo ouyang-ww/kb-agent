@@ -20,6 +20,13 @@ from .kb import KnowledgeBase
 app = typer.Typer(add_completion=False, help="个人知识库 RAG Agent")
 config_app = typer.Typer(help="运行时配置（热切换，无需重启）")
 study_app = typer.Typer(help="学习扩展（可选，默认关闭）")
+concepts_app = typer.Typer(
+    help="概念、出处、消歧与概念页",
+    invoke_without_command=True,
+)
+outline_app = typer.Typer(help="参照系：覆盖率与缺口")
+study_app.add_typer(concepts_app, name="concepts")
+study_app.add_typer(outline_app, name="outline")
 governance_app = typer.Typer(help="治理工具")
 sync_app = typer.Typer(help="同步通道预留（默认不上传，不传输内容）")
 app.add_typer(config_app, name="config")
@@ -83,6 +90,7 @@ def ingest(
         recursive=not no_recursive,
         scope=scope,
     )
+    _echo_derived(kb)
     cost = time.perf_counter() - t0
     typer.echo(f"新增 {len(report.added)} 篇，跳过 {len(report.skipped)} 篇，失败 {len(report.failed)} 篇（耗时 {cost:.1f}s）")
     for did in report.added:
@@ -251,7 +259,7 @@ def audit_log(
 
 @governance_app.command("drain")
 def governance_drain():
-    """消化 doc_events。目前只有 vector_index；其余消费者列在 residual。"""
+    """消化 doc_events。概念消费者只在 study.enabled 和 study.concepts 都打开时一起跑。"""
     kb = _kb()
     report = kb.drain_consumers()
     typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
@@ -461,6 +469,197 @@ def study_answer(
     )
     typer.echo(f"参考答案: {result['expected']}")
     typer.echo(f"出处: {result['source_span']}")
+
+
+def _echo_derived(kb: KnowledgeBase) -> None:
+    """命令退出前消化新事件。失败不影响已经完成的入库，也不打印路径。"""
+    try:
+        report = kb.flush_derived()
+    except Exception:
+        typer.echo("概念抽取未完成，入库结果保持不变", err=True)
+        return
+    if report.get("skipped"):
+        return
+    try:
+        count = len(kb.study.list_concepts())
+    except Exception:
+        typer.echo("概念抽取未完成，入库结果保持不变", err=True)
+        return
+    typer.echo(f"可见概念 {count} 个")
+
+
+def _public_drain(report: dict) -> dict:
+    if report.get("skipped"):
+        return {"skipped": True}
+    public = {}
+    for name, item in report.items():
+        if isinstance(item, dict) and "processed" in item:
+            public[name] = {
+                "processed": int(item.get("processed") or 0),
+                "dead_letter": int(item.get("dead_letter") or 0),
+                "cursor": int(item.get("cursor") or 0),
+            }
+    return public
+
+
+@concepts_app.callback(invoke_without_command=True)
+def concepts_list(
+    ctx: typer.Context,
+    audit: bool = typer.Option(False, "--audit", help="打印重复率和有意义比例"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出，不含路径"),
+):
+    """列出默认可见的概念。隐藏、private、secret、过期和不在允许范围里的不出现。"""
+    if ctx.invoked_subcommand is not None:
+        return
+    kb = _kb()
+    payload = _study_call(
+        kb,
+        lambda: {
+            "concepts": kb.study.list_concepts(),
+            "audit": kb.study.audit_concepts() if audit else None,
+        },
+    )
+    if as_json:
+        typer.echo(json.dumps(payload if audit else payload["concepts"], ensure_ascii=False, indent=2))
+        return
+    rows = payload["concepts"]
+    typer.echo(f"概念 {len(rows)} 个")
+    for row in rows:
+        typer.echo(f"[{row['id']}] {row['name']}")
+        if row.get("definition"):
+            typer.echo(f"    定义: {row['definition'][:80]}")
+        for mention in row.get("mentions") or []:
+            typer.echo(
+                f"    出处: 《{mention['title']}》 {mention['doc_id']} {mention['snippet'][:80]}"
+            )
+    if audit and payload["audit"] is not None:
+        _echo_audit(payload["audit"])
+
+
+def _echo_audit(report: dict) -> None:
+    ratio = report.get("meaningful_ratio")
+    ratio_text = "无概念" if ratio is None else f"{ratio:.3f}"
+    typer.echo(
+        f"重复率 {report['duplicate_rate']:.3f}（上限 {report['duplicate_limit']:.2f}）"
+    )
+    typer.echo(f"有意义 {ratio_text}（下限 {report['meaningful_limit']:.2f}）")
+    typer.echo(report["meaningful_rule"])
+    typer.echo(
+        "人工抽检路径：另取 20 篇真实笔记，看概念能否单独出题。"
+        "见 docs/mvp-l1-to-l3.md 的 L2 验收。"
+    )
+    typer.echo(
+        f"建议合并 {report['suggestions']} 条"
+        f"（相似度 > {report['merge_similarity']} 只建议，不自动合并）"
+    )
+    typer.echo(f"抽取 {report['extractor']}（{report['extract_reason']}）")
+
+
+@concepts_app.command("merge")
+def concepts_merge(
+    left: str = typer.Argument(..., help="保留的概念 id 或名称"),
+    right: str = typer.Argument(..., help="并入左边的概念 id 或名称"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只显示会合并的概念，不写入"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """确认一条合并。自动合并只发生在规范化和别名精确命中。"""
+    kb = _kb()
+    result = _study_call(
+        kb, lambda: kb.study.merge_concepts(left, right, dry_run=dry_run)
+    )
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    action = "将合并" if dry_run else "已合并"
+    typer.echo(f"{action} {result['drop_name']} → {result['keep_name']}")
+
+
+@study_app.command("concept")
+def study_concept(
+    concept_id: str = typer.Argument(..., help="概念 id 或名称"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出，不含路径"),
+):
+    """概念页：定义、出处、相关笔记。没有学习记录时掌握度留空。"""
+    kb = _kb()
+    page = _study_call(kb, lambda: kb.study.concept_page(concept_id))
+    if as_json:
+        typer.echo(json.dumps(page, ensure_ascii=False, indent=2))
+        return
+    typer.echo(page["page"])
+
+
+@study_app.command("drain")
+def study_drain():
+    """消化概念事件。不回放打开开关之前的历史。"""
+    kb = _kb()
+    if not kb.flag("study.enabled"):
+        typer.echo(
+            "学习模块已关闭（study.enabled=off）。摄入、检索和问答不受影响。",
+            err=True,
+        )
+        raise typer.Exit(2)
+    report = _study_call(kb, kb.flush_derived)
+    typer.echo(json.dumps(_public_drain(report), ensure_ascii=False, indent=2))
+
+
+@study_app.command("backfill")
+def study_backfill(
+    dry_run: bool = typer.Option(False, "--dry-run", help="只统计，不抽取"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """重放已有文档的概念。打开学习模块不会自动做这件事。"""
+    kb = _kb()
+    result = _study_call(kb, lambda: kb.backfill_concepts(dry_run=dry_run))
+    if not dry_run:
+        consumers = result.get("consumers")
+        if isinstance(consumers, dict):
+            result = dict(result)
+            result["consumers"] = _public_drain(consumers)
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    typer.echo(
+        f"文档 {result['documents']} 篇，默认可进入概念的 {result['visible']} 篇"
+    )
+    typer.echo("未写入" if dry_run else "已重放")
+
+
+@outline_app.command("import")
+def outline_import(
+    file: Path = typer.Argument(..., help="参照系 YAML", exists=True, dir_okay=False),
+):
+    """导入参照系。不修改源笔记。"""
+    kb = _kb()
+    result = _study_call(kb, lambda: kb.study.import_outline(file))
+    typer.echo(f"参照系 {result['domain']}：{result['nodes']} 个节点")
+
+
+@outline_app.command("coverage")
+def outline_coverage(
+    domain: Optional[str] = typer.Option(None, "--domain", help="只看一个领域"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """对照参照系输出覆盖率与缺口。没有掌握度记录时掌握度覆盖率留空。"""
+    kb = _kb()
+    report = _study_call(kb, lambda: kb.study.outline_coverage(domain))
+    if as_json:
+        typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    coverage = report.get("coverage")
+    coverage_text = "无节点" if coverage is None else f"{coverage:.3f}"
+    mastery = report.get("mastery_coverage")
+    mastery_text = "尚无学习记录" if mastery is None else f"{mastery:.3f}"
+    typer.echo(f"领域 {report.get('domain') or '—'}")
+    if report.get("source"):
+        typer.echo(f"来源 {report['source']}")
+    typer.echo(f"节点 {report['nodes']}，有出处 {report['with_mention']}，覆盖率 {coverage_text}")
+    typer.echo(f"掌握度覆盖率 {mastery_text}")
+    if report["gaps"]:
+        typer.echo("缺口:")
+        for gap in report["gaps"]:
+            typer.echo(f"  - {gap['name']}（{gap['reason']}）")
+    else:
+        typer.echo("缺口: 无")
 
 
 @app.command("open")
