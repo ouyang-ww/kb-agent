@@ -18,7 +18,7 @@ from .extract import (
 from .normalize import normalize_name
 from .outline import coverage_report, flatten_nodes, load_outline_file
 from .pages import remove_page, render_page, write_page
-from .resolve import _follow_merge, concept_id_for, resolve_concept, suggest_merges
+from .resolve import existing_concept, resolve_concept, suggest_merges
 from .schema import Ontology, load_ontology
 
 MEANINGFUL_RULE = (
@@ -286,13 +286,11 @@ class ConceptIndex:
         return edges
 
     def _already_known(self, concept) -> bool:
-        name, _aliases = self.ontology.canonical_name(concept.name, concept.aliases)
-        normalized = normalize_name(name)
-        if not normalized:
-            return True
-        row = _follow_merge(
-            self.store,
-            self.store.find_concept(concept_id_for(self.domain, normalized)),
+        row = existing_concept(
+            concept,
+            ontology=self.ontology,
+            store=self.store,
+            domain=self.domain,
         )
         return row is not None and row.get("status") == "active"
 
@@ -354,9 +352,11 @@ def build_extractor(settings, llm, ontology: Ontology):
 
 
 def _client_matches(client, target) -> bool:
+    """地址、模型和密钥都相同才复用。只对上 DeepSeek 的 URL 不能借用问答密钥。"""
     return (
         getattr(client, "base_url", None) == target.base_url
         and getattr(client, "model", None) == target.model
+        and getattr(client, "api_key", None) == target.api_key
     )
 
 

@@ -42,16 +42,14 @@ def resolve_concept(
     store,
     domain: str,
 ) -> ResolvedConcept | None:
-    """第 1–2 步自动复用。第 3 步别名表已在 canonical_name 里收成同一个规范名。"""
+    """第 1–2 步自动复用。本体别名和已经记下的别名都算精确命中。"""
     name, aliases = ontology.canonical_name(extracted.name, extracted.aliases)
     normalized = normalize_name(name)
     if not normalized:
         return None
-    for alias in aliases:
-        if normalize_name(alias) == normalized:
-            continue
-    existing = store.find_concept(concept_id_for(domain, normalized))
-    existing = _follow_merge(store, existing)
+    existing = existing_concept(
+        extracted, ontology=ontology, store=store, domain=domain
+    )
     created = existing is None
     if existing is None:
         row = store.insert_concept(
@@ -64,7 +62,7 @@ def resolve_concept(
             entity_type=extracted.entity_type,
         )
     else:
-        row = store.add_aliases(existing["id"], aliases, extracted.definition)
+        row = store.add_aliases(existing["id"], [name, *aliases], extracted.definition)
     return ResolvedConcept(
         concept_id=row["id"],
         name=row["name"],
@@ -76,6 +74,34 @@ def resolve_concept(
         evidence=extracted.evidence,
         created=created,
     )
+
+
+def existing_concept(extracted: ExtractedConcept, *, ontology: Ontology, store, domain: str) -> dict | None:
+    """按规范名，或按已经存储的别名，找到仍有效的概念。"""
+    name, aliases = ontology.canonical_name(extracted.name, extracted.aliases)
+    normalized = normalize_name(name)
+    if not normalized:
+        return None
+    found = _follow_merge(store, store.find_concept(concept_id_for(domain, normalized)))
+    if found is not None:
+        return found
+    return _follow_merge(store, _find_by_stored_alias(store, domain, [name, *aliases]))
+
+
+def _find_by_stored_alias(store, domain: str, names: list[str]) -> dict | None:
+    wanted = {normalize_name(item) for item in names}
+    wanted.discard("")
+    if not wanted:
+        return None
+    for row in store.list_concepts(status="active"):
+        if row.get("domain") != domain:
+            continue
+        keys = {normalize_name(str(row.get("name") or ""))}
+        keys.update(normalize_name(str(item)) for item in row.get("aliases") or [])
+        keys.discard("")
+        if keys & wanted:
+            return row
+    return None
 
 
 def _follow_merge(store, row: dict | None) -> dict | None:

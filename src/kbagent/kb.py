@@ -270,7 +270,9 @@ class KnowledgeBase:
         with self._lock:
             if not include_hidden and not self._is_doc_visible(doc_id):
                 raise NotFoundError(f"文档不存在: {doc_id}")
-            return self._indexer.update_document(doc_id, new_content, **kwargs)
+            updated = self._indexer.update_document(doc_id, new_content, **kwargs)
+        self._after_write()
+        return updated
 
     # ================= 读取 =================
     def get_document(

@@ -567,3 +567,123 @@ def test_manual_merge_and_source_files_unchanged(kb, tmp_path):
     assert names == ["甲概念"]
     assert any("乙概念" in alias for alias in kb.study.list_concepts()[0]["aliases"])
     kb.close()
+
+
+def test_update_document_refreshes_concepts_without_a_manual_drain(kb):
+    _enable(kb)
+    doc_id = kb.ingest_text("重排是对初检结果再排序的步骤。", title="笔记")
+    kb.flush_derived()
+    assert [row["name"] for row in kb.study.list_concepts()] == ["重排"]
+
+    updated = kb.update_document(doc_id, "嵌入是把文本映射为稠密向量的技术。")
+    assert updated
+    kb._join_derived(timeout=3)
+    rows = kb.study.list_concepts()
+    names = [row["name"] for row in rows]
+    snippets = [mention["snippet"] for row in rows for mention in row["mentions"]]
+    assert "嵌入" in names
+    assert "重排" not in names
+    assert any("稠密向量" in snippet for snippet in snippets)
+    assert all("再排序" not in snippet for snippet in snippets)
+    kb.close()
+
+
+def test_extractor_sends_study_key_not_the_qa_key(tmp_path, monkeypatch):
+    sent: list[str] = []
+
+    class RecordingClient:
+        def __init__(self, base_url, api_key="", model="deepseek-chat", timeout=60.0, **kwargs):
+            self.base_url = base_url
+            self.api_key = api_key
+            self.model = model
+            self.timeout = timeout
+
+        def chat_json(self, messages, **kwargs):
+            sent.append(self.api_key)
+            assert "qa-secret" not in json.dumps(messages, ensure_ascii=False)
+            return {
+                "concepts": [
+                    {
+                        "name": "重排",
+                        "definition": "对初检结果再排序的步骤",
+                        "aliases": [],
+                        "entity_type": "Concept",
+                        "evidence": "重排是对初检结果再排序的步骤",
+                    }
+                ],
+                "relations": [],
+            }
+
+    monkeypatch.setattr("kbagent.generation.llm.LLMClient", RecordingClient)
+
+    class QaClient:
+        def __init__(self):
+            self.base_url = "https://api.deepseek.com/v1"
+            self.model = "deepseek-chat"
+            self.api_key = "qa-secret"
+            self.calls: list = []
+
+        def chat(self, messages, **kwargs):
+            self.calls.append(messages)
+            return "根据资料 [1]，可以。"
+
+        def chat_json(self, messages, **kwargs):
+            self.calls.append(self.api_key)
+            return {"intent": "kb_question", "rewritten_query": "重排"}
+
+        def vision_chat(self, text, image_paths, model=None):
+            return ""
+
+    qa = QaClient()
+    settings = Settings(
+        storage_dir=tmp_path / "kb",
+        embedding_model="unused",
+        rerank_enabled=False,
+        intent_enabled=False,
+        query_rewrite_enabled=False,
+        multimodal_enabled=False,
+        llm_base_url="https://api.deepseek.com/v1",
+        llm_model="deepseek-chat",
+        llm_api_key="qa-secret",
+        study_extract_api_key="extract-secret",
+    )
+    kb = KnowledgeBase(settings, embedder=FakeEmbedder(), llm=qa)
+    try:
+        _enable(kb)
+        kb.ingest_text("重排是对初检结果再排序的步骤。", title="重排")
+        kb.flush_derived()
+        assert [row["name"] for row in kb.study.list_concepts()] == ["重排"]
+    finally:
+        kb.close()
+    assert sent == ["extract-secret"]
+    assert all(key != "qa-secret" for key in sent)
+
+    from kbagent.study.concepts import build_extractor
+
+    same = RecordingClient(
+        "https://api.deepseek.com/v1",
+        api_key="extract-secret",
+        model="deepseek-chat",
+    )
+    before = len(sent)
+    reused = build_extractor(settings, same, load_ontology(None))
+    assert reused.client is same
+    reused.extract("重排是对初检结果再排序的步骤。")
+    assert sent[before:] == ["extract-secret"]
+
+
+def test_stored_alias_resolves_to_the_existing_concept(kb):
+    _enable(kb)
+    kb.ingest_text("重排（Rerank）是对初检结果再排序的步骤。", title="重排")
+    kb.flush_derived()
+    first = kb.study.list_concepts()
+    assert [row["name"] for row in first] == ["重排"]
+    assert "Rerank" in first[0]["aliases"]
+
+    kb.ingest_text("Rerank是对初检结果再排序的另一种说法。", title="别名")
+    kb.flush_derived()
+    rows = kb.study.list_concepts()
+    assert [row["name"] for row in rows] == ["重排"]
+    assert "Rerank" in rows[0]["aliases"]
+    assert len(rows[0]["mentions"]) == 2
+    kb.close()
