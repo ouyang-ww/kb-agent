@@ -210,12 +210,11 @@ def test_today_answer_persists_next_due(tmp_path):
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
     }
-    version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     conn.close()
-    assert version == 1
+    assert version == 2
     assert {"items", "attempts", "reviews", "schema_version"} <= tables
-    assert "concepts" not in tables
-    assert "mentions" not in tables
+    assert {"concepts", "mentions", "concept_edges", "outline_nodes"} <= tables
     assert "learner_state" not in tables
 
 

@@ -296,6 +296,11 @@ class GovernanceStore:
             self._conn.commit()
 
     # ---- consumer cursor ----
+    def latest_event_id(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM doc_events").fetchone()
+        return int(row[0]) if row else 0
+
     def get_cursor(self, consumer: str) -> int:
         with self._lock:
             row = self._conn.execute(

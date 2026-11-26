@@ -1,7 +1,7 @@
 """doc_events 的消费者。
 
-P1 只接已经存在的向量索引。mentions / items / reports 还没有对应模块，
-这里留下名字和游标位，不提前做学习系统。
+P1 接上了向量索引。mentions / concept_pages 由学习模块在开关打开时挂进来；
+没挂上的名字仍留在 residual，游标保持不动。items / reports / queue / cache 还没有模块。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 VECTOR_CONSUMER = "vector_index"
 
-# 设计文档里的下游。模块还没落地，游标保持 0，方便以后从事件头重放。
+# 设计文档里的下游。真正跑起来的那个会从 residual 里拿掉。
 RESIDUAL_CONSUMERS = (
     "mentions",
     "items",
@@ -136,6 +136,7 @@ def drain_consumers(
             "errors": errors,
             "cursor": cursor,
         }
+    running = {str(consumer.name) for consumer in consumers}
     report["residual"] = [
         {
             "consumer": name,
@@ -143,5 +144,6 @@ def drain_consumers(
             "cursor": governance.get_cursor(name),
         }
         for name in RESIDUAL_CONSUMERS
+        if name not in running
     ]
     return report

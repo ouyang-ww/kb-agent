@@ -80,6 +80,20 @@ class Settings(BaseSettings):
             raise ValueError("KB_NEAR_DUP_HAMMING 和 KB_NEAR_DUP_COSINE_HAMMING 不能为负")
         if not 0.0 <= self.mmr_lambda <= 1.0:
             raise ValueError("KB_MMR_LAMBDA 必须在 0 到 1 之间")
+        mode = str(self.study_extract or "auto").strip().lower()
+        if mode not in {"auto", "heuristic", "llm", "off"}:
+            raise ValueError("KB_STUDY_EXTRACT 必须是 auto / heuristic / llm / off")
+        self.study_extract = mode
+        provider = str(self.study_extract_provider or "deepseek").strip().lower()
+        if provider not in {"deepseek", "openai"}:
+            raise ValueError("KB_STUDY_EXTRACT_PROVIDER 必须是 deepseek 或 openai")
+        self.study_extract_provider = provider
+        if not 0.0 < float(self.study_merge_similarity) <= 1.0:
+            raise ValueError("KB_STUDY_MERGE_SIMILARITY 必须在 (0, 1] 内")
+        if int(self.study_max_concepts_per_chunk) <= 0:
+            raise ValueError("KB_STUDY_MAX_CONCEPTS_PER_CHUNK 必须大于 0")
+        if int(self.study_max_new_concepts_per_doc) <= 0:
+            raise ValueError("KB_STUDY_MAX_NEW_CONCEPTS_PER_DOC 必须大于 0")
         return self
 
     # ---- 存储 ----
@@ -176,6 +190,21 @@ class Settings(BaseSettings):
     study_weekly: bool = True
     study_dashboard: bool = True
     study_notifications: bool = False
+    # 抽取默认不调用云端。auto：有本地模型用本地；否则只有配置了抽取 key 才用提供商（默认 DeepSeek）。
+    study_extract: str = "auto"
+    study_local_model: str = ""
+    study_local_base_url: str = "http://127.0.0.1:11434/v1"
+    study_local_api_key: str = ""
+    study_extract_provider: str = "deepseek"
+    study_extract_base_url: str = ""
+    study_extract_model: str = ""
+    study_extract_api_key: str = ""
+    study_extract_timeout: float = 20.0
+    study_prompt_version: str = "r1"
+    study_ontology_path: str = ""
+    study_merge_similarity: float = 0.88
+    study_max_concepts_per_chunk: int = 3
+    study_max_new_concepts_per_doc: int = 7
     default_scope: str = "default"
 
     # ---- 服务 ----

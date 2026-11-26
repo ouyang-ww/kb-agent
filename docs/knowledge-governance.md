@@ -4,7 +4,7 @@
 > 本文的 P0 / P1 / P2 与 [status §5](./status.md) 的治理阶段同名同义。学习阶段叫 L2、S1–S4，不占用这套编号。
 > 配套：[愿景](./vision.md)、[L1→L3 最小可行闭环拆解](./mvp-l1-to-l3.md)、[知识图谱与本体学习笔记](./knowledge-graph-and-ontology.md)。
 > 覆盖五个问题：**防幻觉、隐藏与抽离、embedding 迁移、知识过期、知识重复。**
-> 实施状态：P0 治理表、scope、hide/unhide、日志、manifest、Key 分权已实现（2026-10-30）。P1 的闸 1、闸 2、库外拒答集、检索 fail-closed、`vector_index` 消费者已实现（2026-11-10）。P2 的闸 3、过期/冲突、近似去重和近邻陷阱 / 冲突 / 过期评测集已实现（2026-11-11）。题库去重、一等历史查询、embedding 迁移演练仍未做。`mentions` / `items` / `reports` 仍是游标占位。
+> 实施状态：P0 治理表、scope、hide/unhide、日志、manifest、Key 分权已实现（2026-10-30）。P1 的闸 1、闸 2、库外拒答集、检索 fail-closed、`vector_index` 消费者已实现（2026-11-10）。P2 的闸 3、过期/冲突、近似去重和近邻陷阱 / 冲突 / 过期评测集已实现（2026-11-11）。题库去重、一等历史查询、embedding 迁移演练仍未做。L2（2026-11-26）起 `mentions` / `concept_pages` 在 `study.enabled` 且 `study.concepts` 时消费事件；关掉时仍是游标占位。`items` / `reports` 仍是游标占位。
 
 ---
 
@@ -562,7 +562,7 @@ CREATE TABLE consumer_cursor (
 3. 失败重试 + 退避；毒事件进 `dead_letter` 表并告警
 4. `kb repair` 可从任意 cursor 重放，保证最终一致
 
-**P1 已落地的只有 `vector_index`。** 它处理 hide / unhide / delete / pending_cleanup，以及确认关系时发出的 supersede / archive，把切块 status 写回去或删掉向量；失败记入 `consumer_dead_letter` 后跳过，避免一条毒事件堵住后面的隐藏。`kb governance drain` 会跑它。`mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只保留名字，游标停在 0，等对应模块出现后再从事件头重放。向量库和 SQLite 不在同一个事务里，处理必须幂等。
+**P1 已落地的只有 `vector_index`。** 它处理 hide / unhide / delete / pending_cleanup，以及确认关系时发出的 supersede / archive，把切块 status 写回去或删掉向量；失败记入 `consumer_dead_letter` 后跳过，避免一条毒事件堵住后面的隐藏。`kb governance drain` 会跑它。P1 当时 `mentions` / `items` / `reports` / `concept_pages` / `queue` / `cache` 只保留名字，游标停在 0。L2 起 `mentions` / `concept_pages` 由学习模块在概念开关打开时从自己的游标消费；关掉时不挂上，游标保持不动。`items` / `reports` / `queue` / `cache` 仍然只有名字。向量库和 SQLite 不在同一个事务里，处理必须幂等。
 
 ### 6.3 派生数据清单
 
